@@ -3927,6 +3927,50 @@ function afc_uni_channel_is_valid(sender_id id, receiver_id id, label_id id) boo
 [all-the-way-down]: https://en.wikipedia.org/wiki/Turtles_all_the_way_down
 [commands]: https://aranya-project.github.io/policy-book/reference/top-level/commands.html
 [crypto-ffi]: https://crates.io/crates/aranya-crypto-ffi
+## TaskCamera
+
+Command for tasking the camera app on a space vehicle. For the COSMOS integration demo, the ground
+operator will send a command that tasks the camera app.
+
+```policy
+action task_camera(task_name string, peer_id id) {
+    publish TaskCamera{
+        task_name: task_name,
+        peer_id: peer_id,
+    }
+}
+
+effect CameraTaskReceived {
+    task_name string,
+}
+
+command TaskCamera {
+    fields {
+        task_name string,
+        peer_id id,
+    }
+
+    seal { return seal_command(serialize(this)) }
+    open { return deserialize(open_envelope(envelope)) }
+
+    policy {
+        check team_exists()
+
+        let author = get_author(envelope)
+        check is_device_on_team(author.device_id)
+
+        let recipient = get_device(this.peer_id)
+        check is_device_on_team(recipient.device_id)
+
+        finish {
+            emit CameraTaskReceived{
+                task_name: this.task_name,
+            }
+        }
+    }
+}
+```
+
 [device-ffi]: https://crates.io/crates/aranya-device-ffi
 [effects]: https://aranya-project.github.io/policy-book/reference/top-level/effects.html
 [envelope]: https://aranya-project.github.io/policy-book/reference/top-level/commands.html#envelope-type

@@ -56,6 +56,7 @@ pub enum Effect {
     AfcUniChannelCreated(AfcUniChannelCreated),
     AfcUniChannelReceived(AfcUniChannelReceived),
     AssignedLabelToDevice(AssignedLabelToDevice),
+    CameraTaskReceived(CameraTaskReceived),
     CheckValidAfcChannels(CheckValidAfcChannels),
     DeviceAdded(DeviceAdded),
     DeviceRemoved(DeviceRemoved),
@@ -127,6 +128,11 @@ pub struct DeviceAdded {
 pub struct DeviceRemoved {
     pub device_id: BaseId,
     pub author_id: BaseId,
+}
+/// CameraTaskReceived policy effect.
+#[effect]
+pub struct CameraTaskReceived {
+    pub task_name: Text,
 }
 /// LabelCreated policy effect.
 #[effect]
@@ -331,6 +337,7 @@ pub enum EphemeralAction {
     query_labels(query_labels),
     query_labels_assigned_to_device(query_labels_assigned_to_device),
     create_afc_uni_channel(create_afc_uni_channel),
+    task_camera(task_camera),
 }
 /// query_devices_on_team policy action.
 #[action(interface = Ephemeral)]
@@ -488,4 +495,10 @@ pub struct query_labels_assigned_to_device {
 pub struct create_afc_uni_channel {
     pub receiver_id: BaseId,
     pub label_id: BaseId,
+}
+/// task_camera policy action.
+#[action(interface = Ephemeral)]
+pub struct task_camera {
+    pub task_name: Text,
+    pub peer_id: BaseId,
 }
