@@ -3693,6 +3693,19 @@ AranyaError aranya_afc_receive_channel_delete_ext(const struct AranyaClient *cli
                                                   struct AranyaExtError *__ext_err);
 #endif
 
+AranyaError aranya_receive_cosmos_ctrl(const struct AranyaClient *client,
+                                       const struct AranyaTeamId *team_id,
+                                       const char *name,
+                                       const uint8_t *ctrl,
+                                       size_t ctrl_len);
+
+AranyaError aranya_receive_cosmos_ctrl_ext(const struct AranyaClient *client,
+                                           const struct AranyaTeamId *team_id,
+                                           const char *name,
+                                           const uint8_t *ctrl,
+                                           size_t ctrl_len,
+                                           struct AranyaExtError *__ext_err);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

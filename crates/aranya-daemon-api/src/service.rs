@@ -563,4 +563,9 @@ pub trait DaemonApi {
     #[cfg(feature = "afc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "afc")))]
     async fn accept_afc_channel(team: TeamId, ctrl: AfcCtrl) -> Result<AfcReceiveChannelInfo>;
+
+    /// Issue a COSMOS camera task command.
+    async fn create_cosmos_ctrl(team: TeamId, name: String) -> Result<Box<[u8]>>;
+    /// Receive and verify a COSMOS control message.
+    async fn receive_cosmos_ctrl(team: TeamId, name: String, ctrl: Box<[u8]>) -> Result<()>;
 }
