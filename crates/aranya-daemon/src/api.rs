@@ -245,6 +245,7 @@ impl EffectHandler {
                 DeviceRemoved(_) => {}
                 RoleAssigned(_) => {}
                 RoleRevoked(_) => {}
+                CameraTaskReceived(_) => {}
                 LabelCreated(_) => {}
                 LabelDeleted(_) => {}
                 AssignedLabelToDevice(_) => {}
@@ -960,7 +961,7 @@ impl DaemonApi for Api {
         let (local_channel_id, channel_id) = self.afc.uni_channel_created(e).await?;
         info!("afc uni channel created");
 
-        let ctrl = get_afc_ctrl(ctrl)?;
+        let ctrl = get_single_cmd(ctrl)?;
 
         Ok(api::AfcSendChannelInfo {
             ctrl,
@@ -1011,25 +1012,33 @@ impl DaemonApi for Api {
         });
     }
 
-    async fn create_cosmos_ctrl(
+    async fn task_camera(
         self,
         _: context::Context,
         team: api::TeamId,
-        name: String,
+        task_name: Text,
+        peer: api::DeviceId,
     ) -> api::Result<Box<[u8]>> {
         self.check_team_valid(team).await?;
 
         let graph = GraphId::from(team.into_id());
 
-        // TODO: implement action once policy is ready
-        todo!()
+        let (ctrl, effects) = self
+            .client
+            .actions(&graph)
+            .task_camera(task_name, peer.into_id().into())
+            .await?;
+        let ctrl = get_single_cmd(ctrl)?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        Ok(ctrl)
     }
 
     async fn receive_cosmos_ctrl(
         self,
         _: context::Context,
         team: api::TeamId,
-        name: String,
+        task_name: Text,
         ctrl: Box<[u8]>,
     ) -> api::Result<()> {
         self.check_team_valid(team).await?;
@@ -1040,7 +1049,16 @@ impl DaemonApi for Api {
         let effects = self.client.session_receive(&mut session, &ctrl).await?;
         self.effect_handler.handle_effects(graph, &effects).await?;
 
-        // TODO: extract name from effect and validate.
+        let [Effect::CameraTaskReceived(e)] = effects.as_slice() else {
+            return Err(anyhow!("unexpected effects").into());
+        };
+        if e.task_name != task_name {
+            return Err(anyhow!("invalid task name").into());
+        }
+        let our_device_id = self.device_id()?;
+        if e.recipient != our_device_id.into_id() {
+            return Err(anyhow!("not intended recipient").into());
+        }
 
         Ok(())
     }
@@ -1517,13 +1535,12 @@ impl From<Perm> for api::Perm {
     }
 }
 
-/// Extract a single command from the session commands to get the AFC control message.
-#[cfg(feature = "afc")]
-fn get_afc_ctrl(cmds: Vec<Box<[u8]>>) -> anyhow::Result<Box<[u8]>> {
+/// Extract a single session command.
+fn get_single_cmd(cmds: Vec<Box<[u8]>>) -> anyhow::Result<Box<[u8]>> {
     let mut cmds = cmds.into_iter();
-    let msg = cmds.next().context("missing AFC control message")?;
+    let msg = cmds.next().context("missing ephemeral command")?;
     if cmds.next().is_some() {
-        anyhow::bail!("too many commands for AFC control message");
+        anyhow::bail!("too many ephemeral commands");
     }
     Ok(msg)
 }

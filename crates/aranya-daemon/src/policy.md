@@ -433,6 +433,7 @@ incremented each time the device is removed from the team.
 
 ```policy
 // Tracks the current logical generation for a device.
+
 //
 // Each time a device is removed from the team, its generation is
 // bumped so that stale per-device state (for example, direct
@@ -3942,6 +3943,7 @@ ephemeral action task_camera(task_name string, peer_id id) {
 
 effect CameraTaskReceived {
     task_name string,
+    recipient id
 }
 
 ephemeral command TaskCamera {
@@ -3962,12 +3964,16 @@ ephemeral command TaskCamera {
         // Only intended recipient should process this command.
         check device::current_user_id() == this.peer_id || device::current_user_id() == author.device_id
 
+        check is_operator(author.role)
+        check is_member(peer.role)
+
         let recipient = get_device(this.peer_id)
         check is_device_on_team(recipient.device_id)
 
         finish {
             emit CameraTaskReceived{
                 task_name: this.task_name,
+                recipient: this.peer_id,
             }
         }
     }

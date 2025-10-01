@@ -450,11 +450,11 @@ impl Team<'_> {
     }
 
     /// Issue a COSMOS camera task command.
-    pub async fn create_cosmos_ctrl(&self, name: String) -> Result<Box<[u8]>> {
+    pub async fn task_camera(&self, task_name: Text, peer: DeviceId) -> Result<Box<[u8]>> {
         let ctrl = self
             .client
             .daemon
-            .create_cosmos_ctrl(create_ctx(), self.id, name)
+            .task_camera(create_ctx(), self.id, task_name, peer.into_api())
             .await
             .map_err(IpcError::new)?
             .map_err(aranya_error)?;
@@ -462,10 +462,10 @@ impl Team<'_> {
     }
 
     /// Receive and verify a COSMOS control message.
-    pub async fn receive_cosmos_ctrl(&self, name: String, ctrl: Box<[u8]>) -> Result<()> {
+    pub async fn receive_cosmos_ctrl(&self, task_name: Text, ctrl: Box<[u8]>) -> Result<()> {
         self.client
             .daemon
-            .receive_cosmos_ctrl(create_ctx(), self.id, name, ctrl)
+            .receive_cosmos_ctrl(create_ctx(), self.id, task_name, ctrl)
             .await
             .map_err(IpcError::new)?
             .map_err(aranya_error)?;

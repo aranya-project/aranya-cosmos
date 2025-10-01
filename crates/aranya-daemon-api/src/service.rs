@@ -565,7 +565,7 @@ pub trait DaemonApi {
     async fn accept_afc_channel(team: TeamId, ctrl: AfcCtrl) -> Result<AfcReceiveChannelInfo>;
 
     /// Issue a COSMOS camera task command.
-    async fn create_cosmos_ctrl(team: TeamId, name: String) -> Result<Box<[u8]>>;
+    async fn task_camera(team: TeamId, task_name: Text, peer: DeviceId) -> Result<Box<[u8]>>;
     /// Receive and verify a COSMOS control message.
-    async fn receive_cosmos_ctrl(team: TeamId, name: String, ctrl: Box<[u8]>) -> Result<()>;
+    async fn receive_cosmos_ctrl(team: TeamId, task_name: Text, ctrl: Box<[u8]>) -> Result<()>;
 }

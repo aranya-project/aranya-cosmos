@@ -461,6 +461,20 @@ where
         self.call_persistent_action(policy::terminate_team(team_id.as_base()))
             .in_current_span()
     }
+
+    #[allow(clippy::type_complexity)]
+    #[instrument(skip_all, fields(task_name = %task_name, peer_id = %peer_id))]
+    fn task_camera(
+        &self,
+        task_name: Text,
+        peer_id: DeviceId,
+    ) -> impl Future<Output = Result<(Vec<Box<[u8]>>, Vec<Effect>)>> + Send {
+        self.session_action(move || VmAction {
+            name: ident!("task_camera"),
+            args: Cow::Owned(vec![Value::from(task_name), Value::from(peer_id)]),
+        })
+        .in_current_span()
+    }
 }
 
 impl<CS: aranya_crypto::CipherSuite> TryFrom<&PublicKeys<CS>> for PublicKeyBundle {

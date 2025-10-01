@@ -2619,13 +2619,13 @@ pub unsafe fn receive_cosmos_ctrl(
 ) -> Result<(), imp::Error> {
     // SAFETY: Caller must supply valid pointer.
     let name = unsafe { CStr::from_ptr(name) };
-    let name = std::str::from_utf8(name.to_bytes())?.to_owned();
+    let name = Text::try_from(name)?;
     let ctrl = Box::from(ctrl);
     client.rt.block_on(
         client
             .inner
             .team(team_id.into())
-            .receive_cosmos_ctrl(name.to_string(), ctrl),
+            .receive_cosmos_ctrl(name, ctrl),
     )?;
     Ok(())
 }

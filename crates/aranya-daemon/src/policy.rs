@@ -133,6 +133,7 @@ pub struct DeviceRemoved {
 #[effect]
 pub struct CameraTaskReceived {
     pub task_name: Text,
+    pub recipient: Id,
 }
 /// LabelCreated policy effect.
 #[effect]
