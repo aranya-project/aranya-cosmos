@@ -1055,10 +1055,6 @@ impl DaemonApi for Api {
         if e.task_name != task_name {
             return Err(anyhow!("invalid task name").into());
         }
-        let our_device_id = self.device_id()?;
-        if e.recipient != our_device_id.into_id() {
-            return Err(anyhow!("not intended recipient").into());
-        }
 
         Ok(())
     }
