@@ -34,15 +34,11 @@ struct Daemon {
 }
 
 impl Daemon {
-    async fn spawn(path: &DaemonPath, work_dir: &Path) -> Result<Self> {
+    async fn spawn(path: &DaemonPath, user_name: &str , work_dir: &Path) -> Result<Self> {
         fs::create_dir_all(&work_dir).await?;
 
         // Prepare daemon dirs and config.
-        // TODO: fix user name variable
-        let user_name = work_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .context("work_dir name UTF-8")?;
+        let user_name = user_name;
         let shm = format!("/shm_{}", user_name);
         let runtime_dir = work_dir.join("run");
         let state_dir = work_dir.join("state");
@@ -64,6 +60,8 @@ impl Daemon {
             cache_dir = {cache_dir:?}
             logs_dir = {logs_dir:?}
             config_dir = {config_dir:?}
+
+            aqc.enable = true
 
             [afc]
             enable = true
@@ -106,7 +104,7 @@ impl ClientCtx {
         info!(user_name, "creating `ClientCtx`");
 
         // Spawn daemon in given work_dir.
-        let daemon = Daemon::spawn(daemon_path, &work_dir).await?;
+        let daemon = Daemon::spawn(daemon_path, user_name, &work_dir).await?;
 
         // UDS path the daemon listens on.
         let uds_sock = work_dir.join("run").join("uds.sock");
@@ -145,9 +143,6 @@ impl ClientCtx {
         Ok(self.client.local_addr().await?)
     }
 
-    fn aqc_net_id_from(&self, addr: SocketAddr) -> NetIdentifier {
-        NetIdentifier::from_str(addr.to_string().as_str()).expect("net identifier")
-    }
 }
 
 #[derive(Deserialize)]
@@ -161,7 +156,7 @@ async fn handle_post(Json(body): Json<PostData>) -> (StatusCode, String) {
     (StatusCode::ACCEPTED, format!("ok: {}", body.message))
 }
 
-fn spawn_rest(bind: SocketAddr) -> thread::JoinHandle<Result<()>> {
+fn spawn_rest_api(bind: SocketAddr) -> thread::JoinHandle<Result<()>> {
     thread::spawn(move || -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -187,6 +182,7 @@ fn spawn_rest(bind: SocketAddr) -> thread::JoinHandle<Result<()>> {
     })
 }
 
+// Args: <daemon_path> <owner_work_dir> <member_work_dir> [rest_bind_addr]
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
@@ -199,7 +195,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Args: <daemon_path> <owner_work_dir> <member_work_dir> [rest_bind_addr]
     let mut args = env::args();
     let _exe = args.next();
     let daemon_exe = args.next().context("missing <daemon_path>")?;
@@ -207,7 +202,7 @@ async fn main() -> Result<()> {
     let member_dir = args.next().context("missing <member_work_dir>")?;
     let bind = args
         .next()
-        .unwrap_or_else(|| "127.0.0.1:8080".to_string())
+        .unwrap_or_else(|| "127.0.0.1:8000".to_string())
         .parse::<SocketAddr>()
         .context("invalid [rest_bind_addr]")?;
 
@@ -244,18 +239,18 @@ async fn main() -> Result<()> {
     info!("member added to team");
 
     // Setup sync peers.
-    let sync_interval = Duration::from_millis(200);
+    let sync_interval = Duration::from_millis(400);
     let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
     let owner_addr = owner.aranya_local_addr().await?;
     let member_addr = member.aranya_local_addr().await?;
-    owner_team.add_sync_peer(member.aqc_net_id_from(member_addr).into(), sync_cfg.clone()).await?;
-    member_team.add_sync_peer(member.aqc_net_id_from(owner_addr).into(), sync_cfg.clone()).await?;
+    owner_team.add_sync_peer((member_addr).into(), sync_cfg.clone()).await?;
+    member_team.add_sync_peer((owner_addr).into(), sync_cfg.clone()).await?;
 
     // Wait a moment for sync.
     sleep(sync_interval * 4).await;
 
     // Start REST API (dedicated thread).
-    let rest = spawn_rest(bind);
+    let rest = spawn_rest_api(bind);
 
     // Keep running (join the REST thread).
     if let Err(e) = rest.join().unwrap_or_else(|_| bail!("REST thread panicked")) {
