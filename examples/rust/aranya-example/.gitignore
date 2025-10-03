@@ -1,2 +1,4 @@
 # ignore build files
 target/
+cosmos-gate/cfs-daemon/
+cosmos-gate/gate-daemon/
