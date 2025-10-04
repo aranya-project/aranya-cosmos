@@ -2,25 +2,23 @@ use std::{
     env,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    str::FromStr,
-    thread,
     time::Duration,
+    sync::Arc,
 };
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result};
 use aranya_client::{
-    client::{Client, DeviceId, KeyBundle, NetIdentifier},
+    client::{Client, DeviceId, KeyBundle},
     AddTeamConfig, AddTeamQuicSyncConfig, CreateTeamConfig, CreateTeamQuicSyncConfig,
     SyncPeerConfig,
 };
 use aranya_util::Addr;
-use axum::{http::StatusCode, routing::post, Json, Router};
+use axum::{http::StatusCode, routing::post, Json, Router, extract::State};
 use backon::{ExponentialBuilder, Retryable};
-use bytes::Bytes;
 use serde::Deserialize;
 use tokio::{fs, process::Child, process::Command, time::sleep};
 use tracing::{debug, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, prelude::*};
+use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Clone, Debug)]
 struct DaemonPath(PathBuf);
@@ -34,7 +32,7 @@ struct Daemon {
 }
 
 impl Daemon {
-    async fn spawn(path: &DaemonPath, user_name: &str , work_dir: &Path) -> Result<Self> {
+    async fn spawn(path: &DaemonPath, user_name: &str, work_dir: &Path) -> Result<Self> {
         fs::create_dir_all(&work_dir).await?;
 
         // Prepare daemon dirs and config.
@@ -91,7 +89,7 @@ impl Daemon {
 }
 
 struct ClientCtx {
-    client: Client,
+    client: Arc<Client>,
     pk: KeyBundle,
     id: DeviceId,
     // keep daemon alive
@@ -131,7 +129,7 @@ impl ClientCtx {
         let id = client.get_device_id().await.context("expected device id")?;
 
         Ok(Self {
-            client,
+            client: Arc::new(client),
             pk,
             id,
             _work_dir: work_dir,
@@ -142,44 +140,82 @@ impl ClientCtx {
     async fn aranya_local_addr(&self) -> Result<SocketAddr> {
         Ok(self.client.local_addr().await?)
     }
-
 }
 
+#[derive(Clone)]
+struct AppState {
+    owner: Arc<Client>,
+}
+
+// Map summary object of dispatcher POST requests.
 #[derive(Deserialize)]
-struct PostData {
-    message: String,
+struct CMDSummary {
+    pub keycloak_id: String,
+    pub target: String,
+    pub packet_name: String,
+    #[serde(deserialize_with = "deserialize_hex_u16")]
+    pub stream_id: u16,
+    pub function_code: u16,
 }
 
-async fn handle_post(Json(body): Json<PostData>) -> (StatusCode, String) {
+fn deserialize_hex_u16<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    struct HexVisitor;
+    impl<'de> serde::de::Visitor<'de> for HexVisitor {
+        type Value = u16;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "a hex string (e.g., \"0x1A2B\" or \"1A2B\") or a number 0-65535")
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<u16, E>
+        where
+            E: serde::de::Error,
+        {
+            u16::try_from(v).map_err(|_| E::custom("number out of range for u16"))
+        }
+        fn visit_str<E>(self, v: &str) -> Result<u16, E>
+        where
+            E: serde::de::Error,
+        {
+            let s = v.trim();
+            let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+            u16::from_str_radix(s, 16).map_err(|_| E::custom("invalid hex u16"))
+        }
+        fn visit_string<E>(self, v: String) -> Result<u16, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_str(&v)
+        }
+    }
+    deserializer.deserialize_any(HexVisitor)
+}
+
+async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSummary>) -> (StatusCode, String) {
     // Minimal echo; extend to use `ClientCtx` if needed.
-    info!("received POST /data: {}", body.message);
-    (StatusCode::ACCEPTED, format!("ok: {}", body.message))
-}
+    info!(
+        "received POST /data: keycloak_id={} target={} packet_name={} stream_id=0x{:04X} function_code={}",
+        &body.keycloak_id,
+        &body.target,
+        &body.packet_name,
+        body.stream_id,
+        body.function_code
+    );
 
-fn spawn_rest_api(bind: SocketAddr) -> thread::JoinHandle<Result<()>> {
-    thread::spawn(move || -> Result<()> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-
-        rt?.block_on(async move {
-            let app = Router::new()
-                .route("/authorize", post(handle_post));
-
-            info!("REST listening on http://{}", bind);
-
-            let listener = tokio::net::TcpListener::bind(bind)
-                            .await
-                            .unwrap();
-
-            axum::serve(listener, app)
-                .await
-                .unwrap();
-
-            Ok::<_, anyhow::Error>(())
-        })?;
-        Ok(())
-    })
+    info!("simulating command processing...");
+    // Example: call a method on the owner client (fetch owner device id).
+    match state.owner.get_device_id().await {
+        Ok(owner_id) => {
+            info!(?owner_id, "owner client device id");
+            (StatusCode::ACCEPTED, format!("CMD ok: {} (owner_id={owner_id:?})", body.packet_name))
+        }
+        Err(e) => {
+            // Keep response short; log the error detail.
+            info!("owner client call failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "owner call failed".to_string())
+        }
+    }
 }
 
 // Args: <daemon_path> <owner_work_dir> <member_work_dir> [rest_bind_addr]
@@ -191,7 +227,10 @@ async fn main() -> Result<()> {
                 .with_file(false)
                 .with_target(false)
                 .compact()
-                .with_filter(EnvFilter::try_from_env("COSMOS_GATE_LOG").unwrap_or_else(|_| EnvFilter::new("info"))),
+                .with_filter(
+                    EnvFilter::try_from_env("COSMOS_GATE_LOG")
+                        .unwrap_or_else(|_| EnvFilter::new("info")),
+                ),
         )
         .init();
 
@@ -202,59 +241,90 @@ async fn main() -> Result<()> {
     let member_dir = args.next().context("missing <member_work_dir>")?;
     let bind = args
         .next()
-        .unwrap_or_else(|| "127.0.0.1:8000".to_string())
+        .unwrap_or_else(|| "127.0.0.1:8080".to_string())
         .parse::<SocketAddr>()
         .context("invalid [rest_bind_addr]")?;
 
     let daemon_path = DaemonPath(daemon_exe.into());
 
+    // Resolve work dirs and init marker path (for onboarding once).
+    let owner_dir_pb = PathBuf::from(&owner_dir);
+    let member_dir_pb = PathBuf::from(&member_dir);
+    let init_marker = owner_dir_pb.join(".aranya_initialized");
+    let already_initialized = fs::metadata(&init_marker).await.is_ok();
+
     // Initialize owner and member contexts.
-    let owner = ClientCtx::new("owner", &daemon_path, PathBuf::from(owner_dir)).await?;
-    let member = ClientCtx::new("member", &daemon_path, PathBuf::from(member_dir)).await?;
+    let owner = ClientCtx::new("owner", &daemon_path, owner_dir_pb.clone()).await?;
+    // Keep the member daemon alive even if we skip onboarding; underscore avoids unused warning.
+    let _member = ClientCtx::new("member", &daemon_path, member_dir_pb.clone()).await?;
 
-    // Create team on owner.
-    info!("creating team");
-    let seed_ikm = {
-        let mut buf = [0u8; 32];
-        owner.client.rand(&mut buf).await;
-        buf
-    };
-    let owner_cfg = {
-        let qs_cfg = CreateTeamQuicSyncConfig::builder()
-            .seed_ikm(seed_ikm)
-            .build()?;
-        CreateTeamConfig::builder().quic_sync(qs_cfg).build()?
-    };
-    let owner_team = owner.client.create_team(owner_cfg).await.context("create team")?;
-    let team_id = owner_team.team_id();
-    info!(%team_id, "team created");
+    if already_initialized {
+        info!("existing initialization detected; skipping onboarding and using persisted daemon state");
+    } else {
+        // Create team on owner.
+        info!("creating team (first-time onboarding)");
+        let seed_ikm = {
+            let mut buf = [0u8; 32];
+            owner.client.rand(&mut buf).await;
+            buf
+        };
+        let owner_cfg = {
+            let qs_cfg = CreateTeamQuicSyncConfig::builder()
+                .seed_ikm(seed_ikm)
+                .build()?;
+            CreateTeamConfig::builder().quic_sync(qs_cfg).build()?
+        };
+        let owner_team = owner
+            .client
+            .create_team(owner_cfg)
+            .await
+            .context("create team")?;
+        let team_id = owner_team.team_id();
+        info!(%team_id, "team created");
 
-    // Onboard member.
-    let add_team_cfg = {
-        let qs_cfg = AddTeamQuicSyncConfig::builder().seed_ikm(seed_ikm).build()?;
-        AddTeamConfig::builder().quic_sync(qs_cfg).team_id(team_id).build()?
-    };
-    let member_team = member.client.add_team(add_team_cfg).await?;
-    owner_team.add_device_to_team(member.pk.clone()).await?;
-    info!("member added to team");
+        // Onboard member.
+        let add_team_cfg = {
+            let qs_cfg = AddTeamQuicSyncConfig::builder()
+                .seed_ikm(seed_ikm)
+                .build()?;
+            AddTeamConfig::builder()
+                .quic_sync(qs_cfg)
+                .team_id(team_id)
+                .build()?
+        };
+        let member_team = _member.client.add_team(add_team_cfg).await?;
+        owner_team.add_device_to_team(_member.pk.clone()).await?;
+        info!("member added to team");
 
-    // Setup sync peers.
-    let sync_interval = Duration::from_millis(400);
-    let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
-    let owner_addr = owner.aranya_local_addr().await?;
-    let member_addr = member.aranya_local_addr().await?;
-    owner_team.add_sync_peer((member_addr).into(), sync_cfg.clone()).await?;
-    member_team.add_sync_peer((owner_addr).into(), sync_cfg.clone()).await?;
+        // Setup sync peers.
+        let sync_interval = Duration::from_millis(400);
+        let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
+        let owner_addr = owner.aranya_local_addr().await?;
+        let member_addr = _member.aranya_local_addr().await?;
+        owner_team
+            .add_sync_peer((member_addr).into(), sync_cfg.clone())
+            .await?;
+        member_team
+            .add_sync_peer((owner_addr).into(), sync_cfg.clone())
+            .await?;
 
-    // Wait a moment for sync.
-    sleep(sync_interval * 4).await;
+        // Wait a moment for sync.
+        sleep(sync_interval * 4).await;
 
-    // Start REST API (dedicated thread).
-    let rest = spawn_rest_api(bind);
-
-    // Keep running (join the REST thread).
-    if let Err(e) = rest.join().unwrap_or_else(|_| bail!("REST thread panicked")) {
-        return Err(e);
+        // Create marker to skip onboarding next time.
+        fs::write(&init_marker, b"ok").await?;
+        info!("onboarding complete; marker written at {}", init_marker.display());
     }
+
+    // Start REST API in this Tokio runtime and pass owner client as state.
+    let state = AppState {
+        owner: owner.client.clone(),
+    };
+    let app = Router::new()
+        .route("/authorize", post(handle_post))
+        .with_state(state);
+    info!("REST listening on http://{}", bind);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    axum::serve(listener, app).await?;
     Ok(())
 }
