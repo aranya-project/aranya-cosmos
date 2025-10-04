@@ -8,9 +8,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use aranya_client::{
-    client::{Client, DeviceId, KeyBundle},
-    AddTeamConfig, AddTeamQuicSyncConfig, CreateTeamConfig, CreateTeamQuicSyncConfig,
-    SyncPeerConfig,
+    client::{Client, DeviceId, TeamId, KeyBundle},
+    AddTeamConfig, AddTeamQuicSyncConfig, CreateTeamConfig, CreateTeamQuicSyncConfig, SyncPeerConfig,
 };
 use aranya_util::Addr;
 use axum::{http::StatusCode, routing::post, Json, Router, extract::State};
@@ -19,6 +18,7 @@ use serde::Deserialize;
 use tokio::{fs, process::Child, process::Command, time::sleep};
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
+use rustix::shm;
 
 #[derive(Clone, Debug)]
 struct DaemonPath(PathBuf);
@@ -38,6 +38,9 @@ impl Daemon {
         // Prepare daemon dirs and config.
         let user_name = user_name;
         let shm = format!("/shm_{}", user_name);
+        // Ensure no stale POSIX SHM exists from previous runs (matches aranya example).
+        let _ = shm::unlink(&shm);
+
         let runtime_dir = work_dir.join("run");
         let state_dir = work_dir.join("state");
         let cache_dir = work_dir.join("cache");
@@ -122,6 +125,7 @@ impl ClientCtx {
         .await
         .context("unable to initialize client")?;
 
+        // Fetch client identity info.
         let pk = client
             .get_key_bundle()
             .await
@@ -145,6 +149,7 @@ impl ClientCtx {
 #[derive(Clone)]
 struct AppState {
     owner: Arc<Client>,
+    owner_team_id: TeamId,
 }
 
 // Map summary object of dispatcher POST requests.
@@ -203,12 +208,13 @@ async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSummary>
         body.function_code
     );
 
-    info!("simulating command processing...");
+    info!("testing state persistence by calling owner client");
+    info!("owner team id: {}", state.owner_team_id);
     // Example: call a method on the owner client (fetch owner device id).
     match state.owner.get_device_id().await {
         Ok(owner_id) => {
             info!(?owner_id, "owner client device id");
-            (StatusCode::ACCEPTED, format!("CMD ok: {} (owner_id={owner_id:?})", body.packet_name))
+            (StatusCode::ACCEPTED, format!("CMD ok: {} (owner_id={owner_id:?}, team_id={})", body.packet_name, state.owner_team_id))
         }
         Err(e) => {
             // Keep response short; log the error detail.
@@ -216,6 +222,10 @@ async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSummary>
             (StatusCode::INTERNAL_SERVER_ERROR, "owner call failed".to_string())
         }
     }
+
+    // let owner_team = state.owner
+    // let rc = state.owner.team(state.)
+
 }
 
 // Args: <daemon_path> <owner_work_dir> <member_work_dir> [rest_bind_addr]
@@ -251,74 +261,27 @@ async fn main() -> Result<()> {
     let owner_dir_pb = PathBuf::from(&owner_dir);
     let member_dir_pb = PathBuf::from(&member_dir);
     let init_marker = owner_dir_pb.join(".aranya_initialized");
+    let team_id_path = owner_dir_pb.join(".aranya_team_id");
     let already_initialized = fs::metadata(&init_marker).await.is_ok();
 
     // Initialize owner and member contexts.
     let owner = ClientCtx::new("owner", &daemon_path, owner_dir_pb.clone()).await?;
     // Keep the member daemon alive even if we skip onboarding; underscore avoids unused warning.
     let _member = ClientCtx::new("member", &daemon_path, member_dir_pb.clone()).await?;
-
-    if already_initialized {
-        info!("existing initialization detected; skipping onboarding and using persisted daemon state");
-    } else {
-        // Create team on owner.
-        info!("creating team (first-time onboarding)");
-        let seed_ikm = {
-            let mut buf = [0u8; 32];
-            owner.client.rand(&mut buf).await;
-            buf
-        };
-        let owner_cfg = {
-            let qs_cfg = CreateTeamQuicSyncConfig::builder()
-                .seed_ikm(seed_ikm)
-                .build()?;
-            CreateTeamConfig::builder().quic_sync(qs_cfg).build()?
-        };
-        let owner_team = owner
-            .client
-            .create_team(owner_cfg)
-            .await
-            .context("create team")?;
-        let team_id = owner_team.team_id();
-        info!(%team_id, "team created");
-
-        // Onboard member.
-        let add_team_cfg = {
-            let qs_cfg = AddTeamQuicSyncConfig::builder()
-                .seed_ikm(seed_ikm)
-                .build()?;
-            AddTeamConfig::builder()
-                .quic_sync(qs_cfg)
-                .team_id(team_id)
-                .build()?
-        };
-        let member_team = _member.client.add_team(add_team_cfg).await?;
-        owner_team.add_device_to_team(_member.pk.clone()).await?;
-        info!("member added to team");
-
-        // Setup sync peers.
-        let sync_interval = Duration::from_millis(400);
-        let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
-        let owner_addr = owner.aranya_local_addr().await?;
-        let member_addr = _member.aranya_local_addr().await?;
-        owner_team
-            .add_sync_peer((member_addr).into(), sync_cfg.clone())
-            .await?;
-        member_team
-            .add_sync_peer((owner_addr).into(), sync_cfg.clone())
-            .await?;
-
-        // Wait a moment for sync.
-        sleep(sync_interval * 4).await;
-
-        // Create marker to skip onboarding next time.
-        fs::write(&init_marker, b"ok").await?;
-        info!("onboarding complete; marker written at {}", init_marker.display());
-    }
+    
+    let owner_team_id = initialize_or_return(
+        &owner,
+        &_member,
+        &init_marker,
+        &team_id_path,
+        already_initialized,
+    )
+    .await?;
 
     // Start REST API in this Tokio runtime and pass owner client as state.
     let state = AppState {
         owner: owner.client.clone(),
+        owner_team_id: owner_team_id,
     };
     let app = Router::new()
         .route("/authorize", post(handle_post))
@@ -328,3 +291,83 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+async fn initialize_or_return(
+    owner: &ClientCtx,
+    _member: &ClientCtx,
+    init_marker: &Path,
+    team_id_path: &Path,
+    already_initialized: bool,
+) -> Result<TeamId> {
+    
+    if already_initialized {
+        info!("already initialized; skipping onboarding");
+        let team_id_str = fs::read_to_string(team_id_path)
+            .await
+            .context("unable to read team_id file")?;
+        let team_id = team_id_str
+            .trim()
+            .parse::<TeamId>()
+            .context("invalid team_id in file")?;
+        return Ok(team_id);
+    }
+
+    // Create team on owner.
+    info!("creating team (first-time onboarding)");
+    let seed_ikm = {
+        let mut buf = [0u8; 32];
+        owner.client.rand(&mut buf).await;
+        buf
+    };
+    let owner_cfg = {
+        let qs_cfg = CreateTeamQuicSyncConfig::builder()
+            .seed_ikm(seed_ikm)
+            .build()?;
+        CreateTeamConfig::builder().quic_sync(qs_cfg).build()?
+    };
+    let owner_team = owner
+        .client
+        .create_team(owner_cfg)
+        .await
+        .context("create team")?;
+    let team_id = owner_team.team_id();
+    info!(%team_id, "team created");
+
+    // Onboard member.
+    let add_team_cfg = {
+        let qs_cfg = AddTeamQuicSyncConfig::builder()
+            .seed_ikm(seed_ikm)
+            .build()?;
+        AddTeamConfig::builder()
+            .quic_sync(qs_cfg)
+            .team_id(team_id)
+            .build()?
+    };
+    let member_team = _member.client.add_team(add_team_cfg).await?;
+    owner_team.add_device_to_team(_member.pk.clone()).await?;
+    info!("member added to team");
+
+    // Setup sync peers.
+    let sync_interval = Duration::from_millis(400);
+    let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
+    let owner_addr = owner.aranya_local_addr().await?;
+    let member_addr = _member.aranya_local_addr().await?;
+    owner_team
+        .add_sync_peer((member_addr).into(), sync_cfg.clone())
+        .await?;
+    member_team
+        .add_sync_peer((owner_addr).into(), sync_cfg.clone())
+        .await?;
+
+    // Wait a moment for sync.
+    sleep(sync_interval * 4).await;
+
+    // Mark initialization complete.
+    fs::write(init_marker, b"initialized").await?;
+    fs::write(team_id_path, team_id.to_string()).await?;
+    info!("wrote init marker and team_id file");
+
+    Ok(team_id)
+}
+
+
