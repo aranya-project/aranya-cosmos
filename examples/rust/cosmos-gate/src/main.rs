@@ -1,9 +1,5 @@
 use std::{
-    env,
-    net::{Ipv4Addr, SocketAddr},
-    path::{Path, PathBuf},
-    time::Duration,
-    sync::Arc,
+    env, net::{Ipv4Addr, SocketAddr}, path::{Path, PathBuf}, str::FromStr, sync::Arc, time::Duration
 };
 
 use anyhow::{Context as _, Result};
@@ -12,7 +8,10 @@ use aranya_client::{
     AddTeamConfig, AddTeamQuicSyncConfig, CreateTeamConfig, CreateTeamQuicSyncConfig, SyncPeerConfig,
 };
 use aranya_util::Addr;
+use aranya_policy_text::Text;
 use axum::{http::StatusCode, routing::post, Json, Router, extract::State};
+use axum::response::{IntoResponse, Response};
+use axum::http::header::CONTENT_TYPE;
 use backon::{ExponentialBuilder, Retryable};
 use serde::Deserialize;
 use tokio::{fs, process::Child, process::Command, time::sleep};
@@ -150,6 +149,7 @@ impl ClientCtx {
 struct AppState {
     owner: Arc<Client>,
     owner_team_id: TeamId,
+    target_member: Arc<Client>
 }
 
 // Map summary object of dispatcher POST requests.
@@ -197,7 +197,7 @@ where
     deserializer.deserialize_any(HexVisitor)
 }
 
-async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSummary>) -> (StatusCode, String) {
+async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSummary>) -> Response {
     // Minimal echo; extend to use `ClientCtx` if needed.
     info!(
         "received POST /data: keycloak_id={} target={} packet_name={} stream_id=0x{:04X} function_code={}",
@@ -208,24 +208,43 @@ async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSummary>
         body.function_code
     );
 
-    info!("testing state persistence by calling owner client");
-    info!("owner team id: {}", state.owner_team_id);
-    // Example: call a method on the owner client (fetch owner device id).
-    match state.owner.get_device_id().await {
-        Ok(owner_id) => {
-            info!(?owner_id, "owner client device id");
-            (StatusCode::ACCEPTED, format!("CMD ok: {} (owner_id={owner_id:?}, team_id={})", body.packet_name, state.owner_team_id))
+    // let owner_team_id = state.owner_team_id.parse::<TeamId>();
+    let owner_team = state.owner.team(state.owner_team_id);
+    // TODO: make task lowercase
+    let task_name = Text::try_from(body.packet_name.clone()).unwrap_or_else(|_| {
+        Text::from_str("unknown").unwrap()
+    });
+
+    // Return an error if we cannot get the target client's device ID.
+    let target_client_id = match state.target_member.get_device_id().await {
+        Ok(id) => id,
+        Err(e) => {
+            info!("failed to get target device id: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to get target device id".to_string())
+                .into_response();
+        }
+    };
+
+    info!("owner_id: {}, owner_team_id: {}", state.owner.get_device_id().await.unwrap(), state.owner_team_id);
+    info!("issuing task_camera to target client id: {}", target_client_id);
+
+    // let ctrl = owner_team.task_camera(task_name, target_client_id)
+    //                             .await
+    //                             .map_err(IpcError::new)?
+    //                             .map_err(aranya_error)?;
+
+    match owner_team.task_camera(task_name, target_client_id).await {
+        Ok(serialized_cmd) => {
+            info!("serialized_cmd produced: {} bytes", serialized_cmd.len());
+            (StatusCode::OK, [(CONTENT_TYPE, "application/octet-stream")], serialized_cmd)
+                .into_response()
         }
         Err(e) => {
-            // Keep response short; log the error detail.
-            info!("owner client call failed: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "owner call failed".to_string())
+            info!("task_camera failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed to produce command bytes".to_string())
+                .into_response()
         }
     }
-
-    // let owner_team = state.owner
-    // let rc = state.owner.team(state.)
-
 }
 
 // Args: <daemon_path> <owner_work_dir> <member_work_dir> [rest_bind_addr]
@@ -269,6 +288,7 @@ async fn main() -> Result<()> {
     // Keep the member daemon alive even if we skip onboarding; underscore avoids unused warning.
     let _member = ClientCtx::new("member", &daemon_path, member_dir_pb.clone()).await?;
     
+    // Create team and onboard member if not already done.
     let owner_team_id = initialize_or_return(
         &owner,
         &_member,
@@ -282,6 +302,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         owner: owner.client.clone(),
         owner_team_id: owner_team_id,
+        target_member: _member.client.clone(),
     };
     let app = Router::new()
         .route("/authorize", post(handle_post))
@@ -358,6 +379,9 @@ async fn initialize_or_return(
     member_team
         .add_sync_peer((owner_addr).into(), sync_cfg.clone())
         .await?;
+
+    // todo: sync now here
+    // _member.client.s
 
     // Wait a moment for sync.
     sleep(sync_interval * 4).await;
