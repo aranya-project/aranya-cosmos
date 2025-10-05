@@ -330,6 +330,11 @@ async fn initialize_or_return(
             .trim()
             .parse::<TeamId>()
             .context("invalid team_id in file")?;
+
+        info!(%team_id, "read team_id from file");
+        info!("member id: {}", _member.id);
+        info!("owner id: {}", owner.id);
+
         return Ok(team_id);
     }
 
@@ -380,11 +385,13 @@ async fn initialize_or_return(
         .add_sync_peer((owner_addr).into(), sync_cfg.clone())
         .await?;
 
-    // todo: sync now here
-    // _member.client.s
-
+    // One way to make sure member receives the team info is to trigger a sync from member to
+    member_team.sync_now(member_addr.into(), None).await?;
     // Wait a moment for sync.
-    sleep(sync_interval * 4).await;
+    // sleep(sync_interval * 4).await;
+
+    // At this point both aranya instances are aware of the team and their roles.
+    info!("onboarding complete");
 
     // Mark initialization complete.
     fs::write(init_marker, b"initialized").await?;
