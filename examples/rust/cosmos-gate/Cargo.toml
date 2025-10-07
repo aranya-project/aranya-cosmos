@@ -46,3 +46,15 @@ serde = { version = "1.0.217", features = ["derive"] }
 serde_json = { version = "1.0.135" }
 rustix = { version = "0.38", features = ["shm"] }
 aranya-policy-text.workspace = true
+
+[lib]
+name = "cosmos_gate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cosmos-gate-init"
+path = "src/main.rs"
+
+[[bin]]
+name = "cosmos-gate-server"
+path = "src/server.rs"

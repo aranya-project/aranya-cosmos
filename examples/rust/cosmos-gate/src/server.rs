@@ -1,10 +1,15 @@
-use std::{env, path::PathBuf};
-use anyhow::{Context as _, Result};
+
+use std::{env, net::SocketAddr, path::PathBuf};
+use anyhow::{Context as _, Result, bail};
 use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
+use tracing::info;
+use axum::Router;
 
-// Import from the local lib crate.
-use cosmos_gate::{ClientCtx, DaemonPath, initialize_or_return, init_marker_path, team_id_path};
+use cosmos_gate::{
+    AppState, ClientCtx, DaemonPath, build_router, init_marker_path, read_team_id, team_id_path,
+};
 
+/// Args: <daemon_path> <owner_work_dir> <member_work_dir> [rest_bind_addr]
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
@@ -20,28 +25,43 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Args: <daemon_path> <owner_work_dir> <member_work_dir>
     let mut args = env::args();
     let _exe = args.next();
     let daemon_exe = args.next().context("missing <daemon_path>")?;
     let owner_dir = args.next().context("missing <owner_work_dir>")?;
     let member_dir = args.next().context("missing <member_work_dir>")?;
+    let bind = args
+        .next()
+        .unwrap_or_else(|| "127.0.0.1:8080".to_string())
+        .parse::<SocketAddr>()
+        .context("invalid [rest_bind_addr]")?;
 
     let daemon_path = DaemonPath(daemon_exe.into());
     let owner_dir_pb = PathBuf::from(&owner_dir);
     let member_dir_pb = PathBuf::from(&member_dir);
 
+    // Require prior initialization.
     let init_marker = init_marker_path(&owner_dir_pb);
-    let team_id_path = team_id_path(&owner_dir_pb);
-    let already_initialized = tokio::fs::metadata(&init_marker).await.is_ok();
+    let team_id_file = team_id_path(&owner_dir_pb);
+    if !tokio::fs::metadata(&init_marker).await.is_ok() {
+        bail!("not initialized; run the init binary first to onboard");
+    }
+    let owner_team_id = read_team_id(&team_id_file).await?;
 
-    // Spawn daemons and clients
+    // Spawn daemons and clients for serving.
     let owner = ClientCtx::new("owner", &daemon_path, owner_dir_pb.clone()).await?;
     let member = ClientCtx::new("member", &daemon_path, member_dir_pb.clone()).await?;
 
-    // Onboard (or print info if already initialized) and exit.
-    let _ = initialize_or_return(&owner, &member, &init_marker, &team_id_path, already_initialized).await?;
+    // Build REST state and router.
+    let state = AppState {
+        owner: owner.client.clone(),
+        owner_team_id,
+        target_member: member.client.clone(),
+    };
+    let app: Router = build_router(state);
+
+    info!("REST listening on http://{}", bind);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    axum::serve(listener, app).await?;
     Ok(())
 }
-
-
