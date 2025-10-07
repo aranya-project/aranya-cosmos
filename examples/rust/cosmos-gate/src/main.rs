@@ -3,7 +3,7 @@ use anyhow::{Context as _, Result};
 use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
 
 // Import from the local lib crate.
-use cosmos_gate::{ClientCtx, DaemonPath, initialize_or_return, init_marker_path, team_id_path};
+use cosmos_gate::{ClientCtx, DaemonPath, initialize_or_return, init_marker_path, team_id_path, member_id_path};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
 
     let init_marker = init_marker_path(&owner_dir_pb);
     let team_id_path = team_id_path(&owner_dir_pb);
+    let member_id_path = member_id_path(&owner_dir_pb);
     let already_initialized = tokio::fs::metadata(&init_marker).await.is_ok();
 
     // Spawn daemons and clients
@@ -40,7 +41,14 @@ async fn main() -> Result<()> {
     let member = ClientCtx::new("member", &daemon_path, member_dir_pb.clone()).await?;
 
     // Onboard (or print info if already initialized) and exit.
-    let _ = initialize_or_return(&owner, &member, &init_marker, &team_id_path, already_initialized).await?;
+    let _ = initialize_or_return(
+        &owner,
+        &member,
+        &init_marker,
+        &team_id_path,
+        &member_id_path,
+        already_initialized
+    ).await?;
     Ok(())
 }
 

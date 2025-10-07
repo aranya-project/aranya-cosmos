@@ -1,4 +1,3 @@
-
 use std::{env, net::SocketAddr, path::PathBuf};
 use anyhow::{Context as _, Result, bail};
 use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
@@ -7,9 +6,10 @@ use axum::Router;
 
 use cosmos_gate::{
     AppState, ClientCtx, DaemonPath, build_router, init_marker_path, read_team_id, team_id_path,
+    member_id_path, read_member_id,
 };
 
-/// Args: <daemon_path> <owner_work_dir> <member_work_dir> [rest_bind_addr]
+/// Args: <daemon_path> <owner_work_dir> [rest_bind_addr]
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
@@ -29,7 +29,6 @@ async fn main() -> Result<()> {
     let _exe = args.next();
     let daemon_exe = args.next().context("missing <daemon_path>")?;
     let owner_dir = args.next().context("missing <owner_work_dir>")?;
-    let member_dir = args.next().context("missing <member_work_dir>")?;
     let bind = args
         .next()
         .unwrap_or_else(|| "127.0.0.1:8080".to_string())
@@ -38,25 +37,25 @@ async fn main() -> Result<()> {
 
     let daemon_path = DaemonPath(daemon_exe.into());
     let owner_dir_pb = PathBuf::from(&owner_dir);
-    let member_dir_pb = PathBuf::from(&member_dir);
 
     // Require prior initialization.
     let init_marker = init_marker_path(&owner_dir_pb);
     let team_id_file = team_id_path(&owner_dir_pb);
+    let member_id_file = member_id_path(&owner_dir_pb);
     if !tokio::fs::metadata(&init_marker).await.is_ok() {
         bail!("not initialized; run the init binary first to onboard");
     }
     let owner_team_id = read_team_id(&team_id_file).await?;
+    let target_member_id = read_member_id(&member_id_file).await?;
 
-    // Spawn daemons and clients for serving.
+    // Spawn owner daemon/client only (member no longer needed here).
     let owner = ClientCtx::new("owner", &daemon_path, owner_dir_pb.clone()).await?;
-    let member = ClientCtx::new("member", &daemon_path, member_dir_pb.clone()).await?;
 
     // Build REST state and router.
     let state = AppState {
         owner: owner.client.clone(),
         owner_team_id,
-        target_member: member.client.clone(),
+        target_member_id,
     };
     let app: Router = build_router(state);
 

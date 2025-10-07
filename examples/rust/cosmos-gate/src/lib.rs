@@ -1,4 +1,3 @@
-
 use std::{
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -155,6 +154,14 @@ pub fn init_marker_path(owner_dir: &Path) -> PathBuf {
 pub fn team_id_path(owner_dir: &Path) -> PathBuf {
     owner_dir.join(".aranya_team_id")
 }
+// NEW: member_id file path and reader
+pub fn member_id_path(owner_dir: &Path) -> PathBuf {
+    owner_dir.join(".aranya_member_id")
+}
+pub async fn read_member_id(path: &Path) -> Result<DeviceId> {
+    let s = fs::read_to_string(path).await.context("unable to read member_id file")?;
+    s.trim().parse::<DeviceId>().context("invalid member_id in file")
+}
 pub async fn read_team_id(path: &Path) -> Result<TeamId> {
     let s = fs::read_to_string(path).await.context("unable to read team_id file")?;
     s.trim().parse::<TeamId>().context("invalid team_id in file")
@@ -164,7 +171,8 @@ pub async fn read_team_id(path: &Path) -> Result<TeamId> {
 pub struct AppState {
     pub owner: Arc<Client>,
     pub owner_team_id: TeamId,
-    pub target_member: Arc<Client>,
+    // REPLACED: was `target_member: Arc<Client>`
+    pub target_member_id: DeviceId,
 }
 
 // Map summary object of dispatcher POST requests.
@@ -229,20 +237,11 @@ pub async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSumm
         Text::from_str("unknown").unwrap()
     });
 
-    // Return an error if we cannot get the target client's device ID.
-    let target_client_id = match state.target_member.get_device_id().await {
-        Ok(id) => id,
-        Err(e) => {
-            info!("failed to get target device id: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to get target device id".to_string())
-                .into_response();
-        }
-    };
-
+    // Simplify: use persisted member id instead of a live client
     info!("owner_id: {}, owner_team_id: {}", state.owner.get_device_id().await.unwrap(), state.owner_team_id);
-    info!("issuing task_camera to target client id: {}", target_client_id);
+    info!("issuing task_camera to target client id: {}", state.target_member_id);
 
-    match owner_team.task_camera(task_name, target_client_id).await {
+    match owner_team.task_camera(task_name, state.target_member_id).await {
         Ok(serialized_cmd) => {
             info!("serialized_cmd produced: {} bytes", serialized_cmd.len());
             (StatusCode::OK, [(CONTENT_TYPE, "application/octet-stream")], serialized_cmd)
@@ -265,13 +264,16 @@ pub async fn initialize_or_return(
     _member: &ClientCtx,
     init_marker: &Path,
     team_id_path: &Path,
+    // NEW ARG: path to persist member_id
+    member_id_path: &Path,
     already_initialized: bool,
 ) -> Result<TeamId> {
     if already_initialized {
         info!("already initialized; skipping onboarding");
         let team_id = read_team_id(team_id_path).await?;
+        let member_id = read_member_id(member_id_path).await?;
         info!(%team_id, "read team_id from file");
-        info!("member id: {}", _member.id);
+        info!("member id: {}", member_id);
         info!("owner id: {}", owner.id);
         return Ok(team_id);
     }
@@ -331,7 +333,9 @@ pub async fn initialize_or_return(
     // Mark initialization complete.
     fs::write(init_marker, b"initialized").await?;
     fs::write(team_id_path, team_id.to_string()).await?;
-    info!("wrote init marker and team_id file");
+    // NEW: persist member id
+    fs::write(member_id_path, _member.id.to_string()).await?;
+    info!("wrote init marker, team_id, and member_id files");
 
     Ok(team_id)
 }
