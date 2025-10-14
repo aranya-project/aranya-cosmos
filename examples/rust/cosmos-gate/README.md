@@ -42,10 +42,10 @@ PROJECT_ROOT/target/release/aranya-daemon
 Create two working directories for persistent state, then run the initializer:
 
 ```bash
-mkdir -p PROJECT_ROOT/examples/cosmos-gate/gate-daemon
-mkdir -p PROJECT_ROOT/examples/cosmos-gate/flight-daemon
+mkdir -p PROJECT_ROOT/examples/rust/cosmos-gate/gate-daemon
+mkdir -p PROJECT_ROOT/examples/rust/cosmos-gate/flight-daemon
 
-cd PROJECT_ROOT/examples/cosmos-gate
+cd PROJECT_ROOT/examples/rust/cosmos-gate
 ```
 
 ```bash
@@ -87,8 +87,8 @@ To enforce authorization, edit `policy.md` inside the daemon source, rebuild `ar
 ## Paths Summary
 
 - Daemon binary: `PROJECT_ROOT/target/release/aranya-daemon`
-- Ground working dir: `PROJECT_ROOT/examples/cosmos-gate/gate-daemon`
-- Flight working dir: `PROJECT_ROOT/examples/cosmos-gate/flight-daemon`
+- Ground working dir: `PROJECT_ROOT/examples/rust/cosmos-gate/gate-daemon`
+- Flight working dir: `PROJECT_ROOT/examples/rust/cosmos-gate/flight-daemon`
 
 You can archive and reuse these working directories to preserve onboarding state.
 
@@ -108,12 +108,12 @@ You can archive and reuse these working directories to preserve onboarding state
 To reset state, stop the server and remove the working directories, then repeat the initialization step:
 
 ```bash
-rm -rf PROJECT_ROOT/examples/cosmos-gate/gate-daemon PROJECT_ROOT/examples/cosmos-gate/flight-daemon
+rm -rf PROJECT_ROOT/examples/rust/cosmos-gate/gate-daemon PROJECT_ROOT/examples/rust/cosmos-gate/flight-daemon
 
-mkdir -p PROJECT_ROOT/examples/cosmos-gate/gate-daemon
-mkdir -p PROJECT_ROOT/examples/cosmos-gate/flight-daemon
+mkdir -p PROJECT_ROOT/examples/rust/cosmos-gate/gate-daemon
+mkdir -p PROJECT_ROOT/examples/rust/cosmos-gate/flight-daemon
 
-cd PROJECT_ROOT/examples/cosmos-gate
+cd PROJECT_ROOT/examples/rust/cosmos-gate
 ```
 
 ```bash
