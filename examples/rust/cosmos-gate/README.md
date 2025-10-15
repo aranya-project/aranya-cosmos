@@ -81,7 +81,7 @@ By default, the provided policy accepts all commands. No RBAC or ABAC is enforce
 
 To enforce authorization, edit `policy.md` inside the daemon source, rebuild `aranya-daemon`, then re-initialize or update your working directories. See:
 
-- Policy documentation: https://github.com/aranya-project/aranya-docs/blob/main/docs/policy-v1.md
+- Policy documentation: https://aranya-project.github.io/core-concepts/policy
 - Policy specification: https://github.com/aranya-project/aranya-docs/blob/main/docs/policy-v1.md
 
 ## Paths Summary
