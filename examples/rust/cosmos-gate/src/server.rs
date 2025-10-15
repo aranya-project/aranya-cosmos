@@ -1,12 +1,12 @@
-use std::{env, net::SocketAddr, path::PathBuf};
-use anyhow::{Context as _, Result, bail};
-use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
-use tracing::info;
+use anyhow::{bail, Context as _, Result};
 use axum::Router;
+use std::{env, net::SocketAddr, path::PathBuf};
+use tracing::info;
+use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
 
 use cosmos_gate::{
-    AppState, ClientCtx, DaemonPath, build_router, init_marker_path, read_team_id, team_id_path,
-    member_id_path, read_member_id,
+    build_router, init_marker_path, member_id_path, read_member_id, read_team_id, team_id_path,
+    AppState, ClientCtx, DaemonPath,
 };
 
 /// Args: <daemon_path> <owner_work_dir> [rest_bind_addr]
