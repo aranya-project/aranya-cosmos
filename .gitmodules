@@ -1,0 +1,4 @@
+[submodule "examples/rust/cosmos-gate/openc3-cosmos-gate"]
+	path = examples/rust/cosmos-gate/openc3-cosmos-gate
+	url = https://github.com/matcala/openc3-cosmos-gate.git
+	branch = main
