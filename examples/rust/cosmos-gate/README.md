@@ -12,7 +12,7 @@ For a full OpenC3 COSMOS walkthrough, see the [companion plugin repository](http
     - If you're interested in running the complete COSMOS demo, initialize the plugin submodule:
   
       ```bash 
-      git submodule update --init
+      git submodule update --init --remote
       ``` 
 3. Cargo available in your shell, verify with `cargo --version`
 
