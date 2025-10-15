@@ -9,13 +9,19 @@ use std::{
 use anyhow::{Context as _, Result};
 use aranya_client::{
     client::{Client, DeviceId, KeyBundle},
-    AddTeamConfig, AddTeamQuicSyncConfig, CreateTeamConfig, CreateTeamQuicSyncConfig, SyncPeerConfig,
-    TeamId,
+    AddTeamConfig, AddTeamQuicSyncConfig, CreateTeamConfig, CreateTeamQuicSyncConfig,
+    SyncPeerConfig, TeamId,
 };
-use aranya_util::Addr;
 use aranya_policy_text::Text;
-use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, routing::post, Json, Router};
+use aranya_util::Addr;
 use axum::http::header::CONTENT_TYPE;
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
 use backon::{ExponentialBuilder, Retryable};
 use rustix::shm;
 use serde::Deserialize;
@@ -159,12 +165,20 @@ pub fn member_id_path(owner_dir: &Path) -> PathBuf {
     owner_dir.join(".aranya_member_id")
 }
 pub async fn read_member_id(path: &Path) -> Result<DeviceId> {
-    let s = fs::read_to_string(path).await.context("unable to read member_id file")?;
-    s.trim().parse::<DeviceId>().context("invalid member_id in file")
+    let s = fs::read_to_string(path)
+        .await
+        .context("unable to read member_id file")?;
+    s.trim()
+        .parse::<DeviceId>()
+        .context("invalid member_id in file")
 }
 pub async fn read_team_id(path: &Path) -> Result<TeamId> {
-    let s = fs::read_to_string(path).await.context("unable to read team_id file")?;
-    s.trim().parse::<TeamId>().context("invalid team_id in file")
+    let s = fs::read_to_string(path)
+        .await
+        .context("unable to read team_id file")?;
+    s.trim()
+        .parse::<TeamId>()
+        .context("invalid team_id in file")
 }
 
 #[derive(Clone)]
@@ -194,7 +208,10 @@ where
     impl<'de> serde::de::Visitor<'de> for HexVisitor {
         type Value = u16;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "a hex string (e.g., \"0x1A2B\" or \"1A2B\") or a number 0-65535")
+            write!(
+                f,
+                "a hex string (e.g., \"0x1A2B\" or \"1A2B\") or a number 0-65535"
+            )
         }
         fn visit_u64<E>(self, v: u64) -> Result<u16, E>
         where
@@ -207,7 +224,10 @@ where
             E: serde::de::Error,
         {
             let s = v.trim();
-            let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+            let s = s
+                .strip_prefix("0x")
+                .or_else(|| s.strip_prefix("0X"))
+                .unwrap_or(s);
             u16::from_str_radix(s, 16).map_err(|_| E::custom("invalid hex u16"))
         }
         fn visit_string<E>(self, v: String) -> Result<u16, E>
@@ -233,30 +253,48 @@ pub async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSumm
 
     let owner_team = state.owner.team(state.owner_team_id);
     // TODO: make task lowercase
-    let task_name = Text::try_from(body.packet_name.clone()).unwrap_or_else(|_| {
-        Text::from_str("unknown").unwrap()
-    });
+    let task_name = Text::try_from(body.packet_name.clone())
+        .unwrap_or_else(|_| Text::from_str("unknown").unwrap());
 
     // Simplify: use persisted member id instead of a live client
-    info!("owner_id: {}, owner_team_id: {}", state.owner.get_device_id().await.unwrap(), state.owner_team_id);
-    info!("issuing task_camera to target client id: {}", state.target_member_id);
+    info!(
+        "owner_id: {}, owner_team_id: {}",
+        state.owner.get_device_id().await.unwrap(),
+        state.owner_team_id
+    );
+    info!(
+        "issuing task_camera to target client id: {}",
+        state.target_member_id
+    );
 
-    match owner_team.task_camera(task_name, state.target_member_id).await {
+    match owner_team
+        .task_camera(task_name, state.target_member_id)
+        .await
+    {
         Ok(serialized_cmd) => {
             info!("serialized_cmd produced: {} bytes", serialized_cmd.len());
-            (StatusCode::OK, [(CONTENT_TYPE, "application/octet-stream")], serialized_cmd)
+            (
+                StatusCode::OK,
+                [(CONTENT_TYPE, "application/octet-stream")],
+                serialized_cmd,
+            )
                 .into_response()
         }
         Err(e) => {
             info!("task_camera failed: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "failed to produce command bytes".to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to produce command bytes".to_string(),
+            )
                 .into_response()
         }
     }
 }
 
 pub fn build_router(state: AppState) -> Router {
-    Router::new().route("/authorize", post(handle_post)).with_state(state)
+    Router::new()
+        .route("/authorize", post(handle_post))
+        .with_state(state)
 }
 
 pub async fn initialize_or_return(

@@ -1,9 +1,11 @@
-use std::{env, path::PathBuf};
 use anyhow::{Context as _, Result};
+use std::{env, path::PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
 
 // Import from the local lib crate.
-use cosmos_gate::{ClientCtx, DaemonPath, initialize_or_return, init_marker_path, team_id_path, member_id_path};
+use cosmos_gate::{
+    init_marker_path, initialize_or_return, member_id_path, team_id_path, ClientCtx, DaemonPath,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,9 +49,8 @@ async fn main() -> Result<()> {
         &init_marker,
         &team_id_path,
         &member_id_path,
-        already_initialized
-    ).await?;
+        already_initialized,
+    )
+    .await?;
     Ok(())
 }
-
-
