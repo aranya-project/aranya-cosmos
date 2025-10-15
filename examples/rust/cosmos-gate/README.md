@@ -2,12 +2,18 @@
 
 This example provisions two Aranya instances, a ground-side command gate and a flight-side policy enforcer, then exposes a REST API that an OpenC3 COSMOS plugin can post telecommand packets to for validation and serialization.
 
-For a full OpenC3 COSMOS walkthrough, see the companion plugin repository: https://github.com/matcala/openc3-cosmos-gate.git
+For a full OpenC3 COSMOS walkthrough, see the [companion plugin repository](https://github.com/matcala/openc3-cosmos-gate.git), included in this repo as a submodule.
 
 ## Prerequisites
 
 1. [rustup](https://rustup.rs/) installed
 2. A local clone of this repository
+
+    - If you're interested in running the complete COSMOS demo, initialize the plugin submodule:
+  
+      ```bash 
+      git submodule update --init
+      ``` 
 3. Cargo available in your shell, verify with `cargo --version`
 
 ## Components
