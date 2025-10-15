@@ -1,7 +1,6 @@
 # Aranya COSMOS
 
-This repository holds the various crates that make up the Aranya COSMOS 
-integration project, which adapts the [main Aranya
+This repository holds the various crates and external resources that make up the Aranya COSMOS integration project, which adapts the [main Aranya
 project](https://github.com/aranya-project/aranya) into a [COSMOS plugin](https://github.com/matcala/openc3-cosmos-gate).
 
 
@@ -11,30 +10,20 @@ Currently, Aranya COSMOS has been tested on Apple Silicon macOS but is expected 
 
 Aranya COSMOS is in its early stages and is not yet ready for production use.
 
-## Crates
+## Resources
 
-- [`demo-esp32-s3`](crates/demo-esp32-s3/) - the Aranya example app
-- [`aranya-embedded-config`](crates/aranya-embedded-config/) - the COMSOS plugin
+- [`cosmos-gate`](examples/rust/cosmos-gate) - the Aranya ground gate app crate.
+- [`openc3-cosmos-gate`](https://github.com/matcala/openc3-cosmos-gate) - the OpenC3 COMSOS plugin to insert Aranya in the COSMOS command flow.
 
-All of these crates are organized into a workspace, but compiling esp32
-projects from the root workspace will not work due esp32 projects requiring a
-different toolchain (see [Setup](#setup) below). Please change directory into
-the individual crates and read their `README`s before attempting any builds.
 
 ## Setup
 
-Aranya and Aranya Embedded require a [rust development
-environment](https://www.rust-lang.org/), but compiling esp32 projects requires
-some extra setup beyond that. Please follow the instructions in [The Rust on
-ESP Book](https://docs.esp-rs.org/book/installation/index.html) for installing
-for both RISC-V and Xtensa targets.
+Generally, the Aranya project requires a [rust development environment](https://www.rust-lang.org/).
+Specific instructions for running a complete OpenC3 COSMOS + Aranya demo can be found in the resources referenced above.
 
-## Contributing
-
-Find information on contributing to the Aranya project in
-[`CONTRIBUTING.md`](https://github.com/aranya-project/.github/blob/main/CONTRIBUTING.md).
 
 ## Maintainers
 
-This repository is maintained by software engineers employed at
+The Aranya+COSMOS integration is lead by [Matteo Calabrese](https://github.com/matcala).
+The Aranya project, on which this project is based, is maintained by software engineers employed at
 [SpiderOak](https://spideroak.com/).
