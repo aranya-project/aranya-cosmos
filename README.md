@@ -141,4 +141,3 @@ docker run --rm --name target -p 6200:6200/udp target:latest
 The Aranya+COSMOS integration is led by [Matteo Calabrese](https://github.com/matcala).
 The Aranya project, on which this project is based, is maintained by software engineers at
 [SpiderOak](https://spideroak.com/).
-

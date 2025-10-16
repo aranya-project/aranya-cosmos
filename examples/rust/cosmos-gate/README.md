@@ -83,12 +83,21 @@ If successful, the server listens on `127.0.0.1` using its default port. Use thi
 
 ## Policy Behavior
 
-By default, the provided policy accepts all commands. No RBAC or ABAC is enforced, commands are always accepted, and a serialized payload is returned for the flight-side Aranya to execute locally.
+To model a space-like command-and-control scenario, this app uses the default Aranya policy and ephemeral commands as follows.
 
-To enforce authorization, edit `policy.md` inside the daemon source, rebuild `aranya-daemon`, then re-initialize or update your working directories. See:
+When issuing a telecommand to the target associated with a specific COSMOS interface, the `cosmos-gate` Aranya instance applies the policy to ensure that:
+  1. The issuer of the action matches the correct ground-operator identity, i.e., the Owner of the team.
+  2. The recipient of the action matches the correct flight-target identity, i.e., a Member within the team.
+  - If these checks pass, the Aranya daemon returns a serialized command to the Aranya client, which is then sent to the target.
+  - If these checks fail, no serialized command is produced and the commanding pipeline stops.
+  - Either way, since this operation is defined as an ephemeral command, no record of the process is added to the Aranya graph.
 
-- Policy documentation: https://aranya-project.github.io/core-concepts/policy
-- Policy specification: https://github.com/aranya-project/aranya-docs/blob/main/docs/policy-v1.md
+This behavior can be customized to fit other scenarios by modifying the default policy defined in [`policy.md`](../../../crates/aranya-daemon/src/policy.md).
+Updating the policy file requires rebuilding `aranya-daemon`. 
+
+For more information on the Aranya policy, see:
+  - Policy documentation: https://aranya-project.github.io/core-concepts/policy
+  - Policy specification: https://github.com/aranya-project/aranya-docs/blob/main/docs/policy-v1.md
 
 ## Paths Summary
 
