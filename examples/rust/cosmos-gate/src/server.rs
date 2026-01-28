@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     let owner_dir = args.next().context("missing <owner_work_dir>")?;
     let bind = args
         .next()
-        .unwrap_or_else(|| "127.0.0.1:8080".to_string())
+        .unwrap_or_else(|| "0.0.0.0:8080".to_string())
         .parse::<SocketAddr>()
         .context("invalid [rest_bind_addr]")?;
 
