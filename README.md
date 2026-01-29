@@ -135,6 +135,9 @@ docker run --rm --name target -p 6200:6200/udp target:latest
 
 > The dispatcher behavior is keyed off the CCSDS function code field. Feel free to modify the dispatcher script to adapt behavior.
 
+## License Notice
+
+This project integrates with OpenC3 COSMOS (licensed under AGPL-3.0) but does not include, redistribute, or modify COSMOS. Users must obtain COSMOS separately and comply with its license. All components provided here are independent works that interact with COSMOS only through its documented plugin, configuration, and protocol interfaces. Use with commercial or Enterprise editions of COSMOS is subject to the applicable OpenC3 license agreement.
 
 ## Maintainers
 
