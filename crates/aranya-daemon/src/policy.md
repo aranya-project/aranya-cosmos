@@ -2442,6 +2442,7 @@ ephemeral command TaskCamera {
             finish {
                 emit CameraTaskReceived {
                     task_name: this.task_name,
+                    recipient: this.peer_id,
                 }
             }
         }
