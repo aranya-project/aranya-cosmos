@@ -3972,10 +3972,12 @@ ephemeral command TaskCamera {
         let recipient = get_device(this.peer_id)
         check is_device_on_team(recipient.device_id)
 
-        finish {
-            emit CameraTaskReceived{
-                task_name: this.task_name,
-                recipient: this.peer_id,
+        if our_id == this.peer_id {
+            finish {
+                emit CameraTaskReceived {
+                    task_name: this.task_name,
+                    recipient: this.peer_id,
+                }
             }
         }
     }
