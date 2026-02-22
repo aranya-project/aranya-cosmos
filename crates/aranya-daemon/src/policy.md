@@ -3960,9 +3960,17 @@ ephemeral command TaskCamera {
 
         let author = get_author(envelope)
         let author_role = get_assigned_role(author.device_id)
-        check is_owner(author_role)
+
+        // SAMPLE_APP_RESET requires Admin role; all other tasks require Owner.
+        if this.task_name == "SAMPLE_APP_RESET" {
+            check is_admin(author_role)
+        } else {
+            check is_owner(author_role)
+        }
 
         let recipient = get_device(this.peer_id)
+        let recipient_role = get_assigned_role(this.peer_id)
+        check is_member(recipient_role)
 
         let our_id = device::current_device_id()
 
