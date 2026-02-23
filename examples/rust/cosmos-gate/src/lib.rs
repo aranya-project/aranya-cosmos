@@ -45,6 +45,7 @@ impl Daemon {
         fs::create_dir_all(work_dir).await?;
 
         // Prepare daemon dirs and config.
+        let quic_addr = std::env::var("ARANYA_QUIC_ADDR").unwrap_or_else(|_| "127.0.0.1:0".into());
         let shm = format!("/shm_{}", user_name);
         // Ensure no stale POSIX SHM exists from previous runs (matches aranya example).
         let _ = shm::unlink(&shm);
@@ -77,7 +78,7 @@ impl Daemon {
 
             [sync.quic]
             enable = true
-            addr = "127.0.0.1:0"
+            addr = "{quic_addr}"
             "#
         );
         fs::write(&cfg_path, cfg_buf).await?;
