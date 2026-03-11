@@ -1,11 +1,11 @@
-use anyhow::{Context as _, Result};
 use std::{env, path::PathBuf};
-use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
 
+use anyhow::{Context as _, Result};
 // Import from the local lib crate.
 use cosmos_gate::{
     init_marker_path, initialize_or_return, member_id_path, team_id_path, ClientCtx, DaemonPath,
 };
+use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {

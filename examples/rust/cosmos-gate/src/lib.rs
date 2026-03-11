@@ -13,10 +13,9 @@ use aranya_client::{
 };
 use aranya_policy_text::Text;
 use aranya_util::Addr;
-use axum::http::header::CONTENT_TYPE;
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header::CONTENT_TYPE, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -24,7 +23,11 @@ use axum::{
 use backon::{ExponentialBuilder, Retryable};
 use rustix::shm;
 use serde::Deserialize;
-use tokio::{fs, process::Child, process::Command, time::sleep};
+use tokio::{
+    fs,
+    process::{Child, Command},
+    time::sleep,
+};
 use tracing::{debug, info};
 
 #[derive(Clone, Debug)]
@@ -120,14 +123,10 @@ impl ClientCtx {
         sleep(Duration::from_millis(100)).await;
 
         // Connect client.
-        let client = (|| {
-            Client::builder()
-                .with_daemon_uds_path(&uds_sock)
-                .connect()
-        })
-        .retry(ExponentialBuilder::default())
-        .await
-        .context("unable to initialize client")?;
+        let client = (|| Client::builder().with_daemon_uds_path(&uds_sock).connect())
+            .retry(ExponentialBuilder::default())
+            .await
+            .context("unable to initialize client")?;
 
         // Fetch client identity info.
         let pk = client
@@ -251,12 +250,12 @@ pub async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSumm
     let owner_team = state.owner.team(state.owner_team_id);
     // TODO: make task lowercase
     let task_name = Text::try_from(body.packet_name.clone())
-        .unwrap_or_else(|_| Text::from_str("unknown").unwrap());
+        .unwrap_or_else(|_| Text::from_str("unknown").expect("valid text"));
 
     // Simplify: use persisted member id instead of a live client
     info!(
         "owner_id: {}, owner_team_id: {}",
-        state.owner.get_device_id().await.unwrap(),
+        state.owner.get_device_id().await.expect("owner device id"),
         state.owner_team_id
     );
     info!(
@@ -345,7 +344,9 @@ pub async fn initialize_or_return(
             .build()?
     };
     let member_team = _member.client.add_team(add_team_cfg).await?;
-    owner_team.add_device(_member.pk.clone(), None, Rank::new(0)).await?;
+    owner_team
+        .add_device(_member.pk.clone(), None, Rank::new(0))
+        .await?;
     info!("member added to team");
 
     // Setup sync peers.
@@ -354,10 +355,10 @@ pub async fn initialize_or_return(
     let owner_addr = owner.aranya_local_addr().await?;
     let member_addr = _member.aranya_local_addr().await?;
     owner_team
-        .add_sync_peer(member_addr.clone(), sync_cfg.clone())
+        .add_sync_peer(member_addr, sync_cfg.clone())
         .await?;
     member_team
-        .add_sync_peer(owner_addr.clone(), sync_cfg.clone())
+        .add_sync_peer(owner_addr, sync_cfg.clone())
         .await?;
 
     // One way to make sure member receives the team info is to trigger a sync from member to owner.

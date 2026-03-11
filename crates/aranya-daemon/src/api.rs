@@ -1535,6 +1535,7 @@ impl From<Perm> for api::Perm {
 }
 
 /// Extract a single session command.
+#[cfg(feature = "afc")]
 fn get_single_cmd(cmds: Vec<Box<[u8]>>) -> anyhow::Result<Box<[u8]>> {
     let mut cmds = cmds.into_iter();
     let msg = cmds.next().context("missing ephemeral command")?;
