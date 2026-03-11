@@ -32,7 +32,8 @@ async fn test_cosmos_task_camera_roundtrip() -> Result<()> {
     let mut devices = DevicesCtx::new("test_cosmos_roundtrip").await?;
 
     let team_id = devices.create_and_add_team().await?;
-    devices.add_all_device_roles(team_id).await?;
+    let roles = devices.setup_default_roles(team_id).await?;
+    devices.add_all_device_roles(team_id, &roles).await?;
 
     let owner_team = devices.owner.client.team(team_id);
     let membera_team = devices.membera.client.team(team_id);
@@ -62,7 +63,8 @@ async fn test_cosmos_task_camera_wrong_name() -> Result<()> {
     let mut devices = DevicesCtx::new("test_cosmos_wrong_name").await?;
 
     let team_id = devices.create_and_add_team().await?;
-    devices.add_all_device_roles(team_id).await?;
+    let roles = devices.setup_default_roles(team_id).await?;
+    devices.add_all_device_roles(team_id, &roles).await?;
 
     let owner_team = devices.owner.client.team(team_id);
     let membera_team = devices.membera.client.team(team_id);

@@ -113,6 +113,12 @@ pub struct AssignedLabelToDevice {
     pub label_id: BaseId,
     pub author_id: BaseId,
 }
+/// CameraTaskReceived policy effect.
+#[effect]
+pub struct CameraTaskReceived {
+    pub task_name: Text,
+    pub recipient: BaseId,
+}
 /// CheckValidAfcChannels policy effect.
 #[effect]
 pub struct CheckValidAfcChannels {}
@@ -128,12 +134,6 @@ pub struct DeviceAdded {
 pub struct DeviceRemoved {
     pub device_id: BaseId,
     pub author_id: BaseId,
-}
-/// CameraTaskReceived policy effect.
-#[effect]
-pub struct CameraTaskReceived {
-    pub task_name: Text,
-    pub recipient: Id,
 }
 /// LabelCreated policy effect.
 #[effect]

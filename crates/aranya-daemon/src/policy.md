@@ -3959,26 +3959,27 @@ ephemeral command TaskCamera {
         check team_exists()
 
         let author = get_author(envelope)
-        check is_device_on_team(author.device_id)
+        let author_role = get_assigned_role(author.device_id)
+        check is_owner(author_role)
+
+        let recipient = get_device(this.peer_id)
 
         let our_id = device::current_device_id()
 
-        // Only author and intended recipient should process this command.
-        check our_id == this.peer_id || our_id == author.device_id
-
-        check is_owner(author.role)
-        check is_member(peer.role)
-
-        let recipient = get_device(this.peer_id)
-        check is_device_on_team(recipient.device_id)
-
-        if our_id == this.peer_id {
+        if our_id == author.device_id {
+            // We authored this command — nothing to emit on the sender side.
+            finish {}
+        } else if our_id == this.peer_id {
+            // We are the intended recipient.
             finish {
                 emit CameraTaskReceived {
                     task_name: this.task_name,
                     recipient: this.peer_id,
                 }
             }
+        } else {
+            // Only the author and recipient should process this command.
+            check false
         }
     }
 }

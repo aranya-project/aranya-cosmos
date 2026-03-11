@@ -42,7 +42,6 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, trace, warn};
 
-#[cfg(feature = "afc")]
 use crate::actions::SessionData;
 #[cfg(feature = "afc")]
 use crate::afc::Afc;
@@ -1019,16 +1018,21 @@ impl DaemonApi for Api {
         task_name: Text,
         peer: api::DeviceId,
     ) -> api::Result<Box<[u8]>> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
-        let graph = GraphId::from(team.into_id());
-
-        let (ctrl, effects) = self
+        let SessionData {
+            #[cfg(feature = "afc")]
+            ctrl,
+            effects,
+        } = self
             .client
-            .actions(&graph)
-            .task_camera(task_name, peer.into_id().into())
+            .actions(graph)
+            .task_camera(task_name, DeviceId::transmute(peer))
             .await?;
+        #[cfg(feature = "afc")]
         let ctrl = get_single_cmd(ctrl)?;
+        #[cfg(not(feature = "afc"))]
+        let ctrl = Box::default();
         self.effect_handler.handle_effects(graph, &effects).await?;
 
         Ok(ctrl)
@@ -1041,10 +1045,9 @@ impl DaemonApi for Api {
         task_name: Text,
         ctrl: Box<[u8]>,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
-        let graph = GraphId::from(team.into_id());
-        let mut session = self.client.session_new(&graph).await?;
+        let mut session = self.client.session_new(graph).await?;
 
         let effects = self.client.session_receive(&mut session, &ctrl).await?;
         self.effect_handler.handle_effects(graph, &effects).await?;

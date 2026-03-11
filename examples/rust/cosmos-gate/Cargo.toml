@@ -6,7 +6,17 @@ authors = ["SpiderOak, Inc."]
 edition = "2021"
 license = "AGPL-3.0-only"
 repository = "https://github.com/aranya-project/aranya"
-rust-version = "1.85"
+rust-version = "1.90"
+
+[features]
+default = [
+    "afc",
+    "aranya-client/default",
+]
+
+afc = ["aranya-client/afc"]
+preview = ["aranya-client/preview"]
+experimental = ["aranya-client/experimental"]
 
 [lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
@@ -26,9 +36,8 @@ unwrap_used = "warn"
 wildcard_imports = "warn"
 
 [dependencies]
-aranya-client = { path = "../../../crates/aranya-client", features = ["preview", "afc", "aqc", "experimental"] }
-aranya-daemon-api = { path = "../../../crates/aranya-daemon-api", features = ["preview", "afc", "aqc", "experimental"] }
-aranya-util = { path = "../../../crates/aranya-util" }
+aranya-client = { workspace = true, default-features = false }
+aranya-util = { workspace = true }
 
 anyhow = { version = "1.0.97" }
 backon = { version = "1.4.0" }
@@ -58,3 +67,9 @@ path = "src/main.rs"
 [[bin]]
 name = "cosmos-gate-server"
 path = "src/server.rs"
+
+
+[package.metadata.cargo-all-features]
+always_include_features = [
+    "default",
+]

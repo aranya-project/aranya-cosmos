@@ -462,18 +462,16 @@ where
             .in_current_span()
     }
 
+    /// Invokes `task_camera` to issue a COSMOS camera task command.
     #[allow(clippy::type_complexity)]
     #[instrument(skip_all, fields(task_name = %task_name, peer_id = %peer_id))]
     fn task_camera(
         &self,
         task_name: Text,
         peer_id: DeviceId,
-    ) -> impl Future<Output = Result<(Vec<Box<[u8]>>, Vec<Effect>)>> + Send {
-        self.session_action(move || VmAction {
-            name: ident!("task_camera"),
-            args: Cow::Owned(vec![Value::from(task_name), Value::from(peer_id)]),
-        })
-        .in_current_span()
+    ) -> impl Future<Output = Result<SessionData>> + Send {
+        self.call_session_action(policy::task_camera(task_name, peer_id.as_base()))
+            .in_current_span()
     }
 }
 

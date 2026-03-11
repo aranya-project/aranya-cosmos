@@ -1,5 +1,4 @@
 use std::{
-    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -8,7 +7,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use aranya_client::{
-    client::{Client, DeviceId, KeyBundle},
+    client::{Client, DeviceId, PublicKeyBundle, Rank},
     AddTeamConfig, AddTeamQuicSyncConfig, CreateTeamConfig, CreateTeamQuicSyncConfig,
     SyncPeerConfig, TeamId,
 };
@@ -100,7 +99,7 @@ impl Daemon {
 
 pub struct ClientCtx {
     pub client: Arc<Client>,
-    pub pk: KeyBundle,
+    pub pk: PublicKeyBundle,
     pub id: DeviceId,
     // keep daemon alive
     _work_dir: PathBuf,
@@ -121,11 +120,9 @@ impl ClientCtx {
         sleep(Duration::from_millis(100)).await;
 
         // Connect client.
-        let any_addr = Addr::from((Ipv4Addr::LOCALHOST, 0));
         let client = (|| {
             Client::builder()
-                .daemon_uds_path(&uds_sock)
-                .aqc_server_addr(&any_addr)
+                .with_daemon_uds_path(&uds_sock)
                 .connect()
         })
         .retry(ExponentialBuilder::default())
@@ -134,7 +131,7 @@ impl ClientCtx {
 
         // Fetch client identity info.
         let pk = client
-            .get_key_bundle()
+            .get_public_key_bundle()
             .await
             .context("expected key bundle")?;
         let id = client.get_device_id().await.context("expected device id")?;
@@ -148,7 +145,7 @@ impl ClientCtx {
         })
     }
 
-    pub async fn aranya_local_addr(&self) -> Result<SocketAddr> {
+    pub async fn aranya_local_addr(&self) -> Result<Addr> {
         Ok(self.client.local_addr().await?)
     }
 }
@@ -207,7 +204,7 @@ where
     struct HexVisitor;
     impl<'de> serde::de::Visitor<'de> for HexVisitor {
         type Value = u16;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(
                 f,
                 "a hex string (e.g., \"0x1A2B\" or \"1A2B\") or a number 0-65535"
@@ -348,7 +345,7 @@ pub async fn initialize_or_return(
             .build()?
     };
     let member_team = _member.client.add_team(add_team_cfg).await?;
-    owner_team.add_device_to_team(_member.pk.clone()).await?;
+    owner_team.add_device(_member.pk.clone(), None, Rank::new(0)).await?;
     info!("member added to team");
 
     // Setup sync peers.
@@ -357,14 +354,14 @@ pub async fn initialize_or_return(
     let owner_addr = owner.aranya_local_addr().await?;
     let member_addr = _member.aranya_local_addr().await?;
     owner_team
-        .add_sync_peer((member_addr).into(), sync_cfg.clone())
+        .add_sync_peer(member_addr.clone(), sync_cfg.clone())
         .await?;
     member_team
-        .add_sync_peer((owner_addr).into(), sync_cfg.clone())
+        .add_sync_peer(owner_addr.clone(), sync_cfg.clone())
         .await?;
 
     // One way to make sure member receives the team info is to trigger a sync from member to owner.
-    member_team.sync_now(member_addr.into(), None).await?;
+    member_team.sync_now(member_addr, None).await?;
 
     info!("onboarding complete");
 
