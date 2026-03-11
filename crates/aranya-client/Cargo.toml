@@ -70,6 +70,10 @@ path = "tests/tests.rs"
 name = "ring_convergence"
 path = "tests/ring_convergence.rs"
 
+[[test]]
+name = "cosmos"
+path = "tests/cosmos.rs"
+
 
 [package.metadata.cargo-all-features]
 always_include_features = [
