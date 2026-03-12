@@ -69,6 +69,14 @@ name = "cosmos-gate-server"
 path = "src/server.rs"
 
 
+[dev-dependencies]
+tower = { version = "0.5.1", features = ["util"] }
+http-body-util = "0.1.0"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
 [package.metadata.cargo-all-features]
 always_include_features = [
     "default",

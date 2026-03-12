@@ -1408,11 +1408,13 @@ dependencies = [
  "buggy",
  "bytes",
  "futures-util",
+ "http-body-util",
  "rustix 0.38.44",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
