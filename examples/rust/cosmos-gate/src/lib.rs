@@ -71,8 +71,6 @@ impl Daemon {
             logs_dir = {logs_dir:?}
             config_dir = {config_dir:?}
 
-            aqc.enable = true
-
             [afc]
             enable = true
             shm_path = {shm:?}
@@ -349,20 +347,20 @@ pub async fn initialize_or_return(
         .await?;
     info!("member added to team");
 
-    // Setup sync peers.
-    let sync_interval = Duration::from_millis(400);
-    let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
+    // Trigger a one-shot sync so the member receives the team info from the owner.
     let owner_addr = owner.aranya_local_addr().await?;
     let member_addr = _member.aranya_local_addr().await?;
+    member_team.sync_now(owner_addr, None).await?;
+
+    // Setup background sync peers (after the initial sync completes).
+    let sync_interval = Duration::from_millis(400);
+    let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
     owner_team
         .add_sync_peer(member_addr, sync_cfg.clone())
         .await?;
     member_team
         .add_sync_peer(owner_addr, sync_cfg.clone())
         .await?;
-
-    // One way to make sure member receives the team info is to trigger a sync from member to owner.
-    member_team.sync_now(member_addr, None).await?;
 
     info!("onboarding complete");
 
