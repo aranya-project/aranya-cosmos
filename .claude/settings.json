@@ -10,11 +10,6 @@
       "Bash(cat *)",
       "Bash(head *)",
       "Bash(tail *)"
-    ],
-    "deny": [
-      "Bash(git push *)",
-      "Bash(curl *)",
-      "Bash(wget *)"
     ]
   },
   "env": {

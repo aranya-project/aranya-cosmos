@@ -9,3 +9,5 @@
 
 # CMake
 build/
+
+.claude
