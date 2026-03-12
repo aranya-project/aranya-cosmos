@@ -41,10 +41,6 @@ aranya-util = { workspace = true }
 
 anyhow = { version = "1.0.97" }
 backon = { version = "1.4.0" }
-buggy = { version = "0.1.0" }
-bytes = { version = "1.10.0" }
-futures-util = { version = "0.3" }
-tempfile = { version = "3.17.1" }
 tokio = { version = "1.44.2", features = ["io-util", "macros", "net", "process", "sync", "rt-multi-thread", "time"] }
 tracing = { version = "0.1.41" }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
@@ -70,6 +66,7 @@ path = "src/server.rs"
 
 
 [dev-dependencies]
+tempfile = { version = "3.17.1" }
 tower = { version = "0.5.1", features = ["util"] }
 http-body-util = "0.1.0"
 

@@ -1,7 +1,6 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
 use anyhow::{bail, Context as _, Result};
-use axum::Router;
 use cosmos_gate::{
     build_router, init_marker_path, member_id_path, read_member_id, read_team_id, team_id_path,
     AppState, ClientCtx, DaemonPath,
@@ -42,7 +41,7 @@ async fn main() -> Result<()> {
     let init_marker = init_marker_path(&owner_dir_pb);
     let team_id_file = team_id_path(&owner_dir_pb);
     let member_id_file = member_id_path(&owner_dir_pb);
-    if !tokio::fs::metadata(&init_marker).await.is_ok() {
+    if tokio::fs::metadata(&init_marker).await.is_err() {
         bail!("not initialized; run the init binary first to onboard");
     }
     let owner_team_id = read_team_id(&team_id_file).await?;
@@ -57,7 +56,7 @@ async fn main() -> Result<()> {
         owner_team_id,
         target_member_id,
     };
-    let app: Router = build_router(state);
+    let app = build_router(state);
 
     info!("REST listening on http://{}", bind);
     let listener = tokio::net::TcpListener::bind(bind).await?;
