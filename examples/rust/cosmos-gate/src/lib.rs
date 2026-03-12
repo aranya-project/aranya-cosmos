@@ -347,20 +347,23 @@ pub async fn initialize_or_return(
         .await?;
     info!("member added to team");
 
-    // Trigger a one-shot sync so the member receives the team info from the owner.
-    let owner_addr = owner.aranya_local_addr().await?;
-    let member_addr = _member.aranya_local_addr().await?;
-    member_team.sync_now(owner_addr, None).await?;
-
-    // Setup background sync peers (after the initial sync completes).
+    // Setup sync peers.
     let sync_interval = Duration::from_millis(400);
     let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
+    let owner_addr = owner.aranya_local_addr().await?;
+    let member_addr = _member.aranya_local_addr().await?;
     owner_team
         .add_sync_peer(member_addr, sync_cfg.clone())
         .await?;
     member_team
         .add_sync_peer(owner_addr, sync_cfg.clone())
         .await?;
+
+    // Let background sync settle before triggering a one-shot sync.
+    sleep(Duration::from_millis(sync_interval.as_millis() as u64 + 100)).await;
+
+    // Trigger a sync so the member receives the team info from the owner.
+    member_team.sync_now(owner_addr, None).await?;
 
     info!("onboarding complete");
 

@@ -95,9 +95,8 @@ Update of the aranya-cosmos fork (aranya-project/aranya-cosmos) to match upstrea
     - `member_team.sync_now(member_addr, None)` was syncing the member with *itself* instead of the owner
     - Fixed to `member_team.sync_now(owner_addr, None)`
 
-18. **Fixed sync ordering issue** (`lib.rs`):
-    - `add_sync_peer` (background sync, 400ms interval) was called *before* the initial `sync_now`, causing the background sync manager to race with the one-shot sync and produce QUIC connection conflicts (`application::Error(0)`)
-    - Reordered: `sync_now` first, then `add_sync_peer` — eliminates the race
+18. **Fixed sync race condition** (`lib.rs`):
+    - Background sync peers (400ms interval) need time to settle before `sync_now` is called, otherwise both race for QUIC connections producing `application::Error(0)` — added a settle delay between `add_sync_peer` and `sync_now` (matching the pattern in `aranya-example`)
 
 19. **Added cosmos-gate integration tests** (`tests/integration.rs`, 6 tests):
     - **Init tests**:
