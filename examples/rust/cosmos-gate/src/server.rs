@@ -59,6 +59,8 @@ async fn main() -> Result<()> {
     let app = build_router(state);
 
     info!("REST listening on http://{}", bind);
+    info!("team_id:  {}", owner_team_id);
+    info!("owner_id: {}", owner.id);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
