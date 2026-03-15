@@ -41,14 +41,14 @@ fn find_daemon_binary() -> PathBuf {
         .parent()
         .unwrap();
 
-    let debug_path = workspace_root.join("target/debug/aranya-daemon");
     let release_path = workspace_root.join("target/release/aranya-daemon");
+    let debug_path = workspace_root.join("target/debug/aranya-daemon");
 
-    if debug_path.exists() {
-        return debug_path;
-    }
     if release_path.exists() {
         return release_path;
+    }
+    if debug_path.exists() {
+        return debug_path;
     }
     panic!(
         "aranya-daemon binary not found at {} or {}. \

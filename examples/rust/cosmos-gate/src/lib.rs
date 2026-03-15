@@ -308,6 +308,15 @@ pub async fn initialize_or_return(
     let team_id = owner_team.team_id();
     info!(%team_id, "team created");
 
+    // Setup default roles (admin, operator, member).
+    info!("creating default roles");
+    let roles = owner_team.setup_default_roles().await?;
+    let member_role = roles
+        .iter()
+        .find(|r| r.name == "member")
+        .context("no member role")?
+        .clone();
+
     // Onboard member.
     let add_team_cfg = {
         let qs_cfg = AddTeamQuicSyncConfig::builder()
@@ -319,10 +328,22 @@ pub async fn initialize_or_return(
             .build()?
     };
     let member_team = member.client.add_team(add_team_cfg).await?;
+    let member_role_rank = owner_team.query_rank(member_role.id).await?;
     owner_team
-        .add_device(member.pk.clone(), None, Rank::new(0))
+        .add_device(
+            member.pk.clone(),
+            None,
+            Rank::new(member_role_rank.value().saturating_sub(1)),
+        )
         .await?;
     info!("member added to team");
+
+    // Assign member role.
+    owner_team
+        .device(member.id)
+        .assign_role(member_role.id)
+        .await?;
+    info!("member role assigned");
 
     // Setup sync peers.
     let sync_interval = Duration::from_millis(400);
@@ -339,7 +360,8 @@ pub async fn initialize_or_return(
     // Let background sync settle before triggering a one-shot sync.
     sleep(sync_interval + Duration::from_millis(100)).await;
 
-    // Trigger a sync so the member receives the team info from the owner.
+    // Sync bidirectionally so both devices see each other's state.
+    owner_team.sync_now(member_addr, None).await?;
     member_team.sync_now(owner_addr, None).await?;
 
     info!("onboarding complete");
