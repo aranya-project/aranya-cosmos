@@ -2611,6 +2611,50 @@ pub fn afc_receive_channel_delete(
     Ok(())
 }
 
+/// Issue a COSMOS camera task command targeting a peer device.
+///
+/// Returns an `AranyaBufferTooSmall` error if the output buffer is too small
+/// to hold the control message bytes. Writes the required length to `ctrl_len`.
+///
+/// @param[in]  client the Aranya Client
+/// @param[in]  team_id the team's ID
+/// @param[in]  name the task name (C string)
+/// @param[in]  peer the target device's ID
+/// @param[out] ctrl output buffer for control message bytes
+/// @param[in,out] ctrl_len the number of bytes written (or required) for the ctrl buffer
+///
+/// @relates AranyaClient.
+pub unsafe fn task_camera(
+    client: &Client,
+    team_id: &TeamId,
+    name: *const c_char,
+    peer: &DeviceId,
+    ctrl: *mut MaybeUninit<u8>,
+    ctrl_len: &mut usize,
+) -> Result<(), imp::Error> {
+    // SAFETY: Caller must supply valid pointer.
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = Text::try_from(name)?;
+    let result = client.rt.block_on(
+        client
+            .inner
+            .team(team_id.into())
+            .task_camera(name, peer.into()),
+    )?;
+
+    if *ctrl_len < result.len() {
+        *ctrl_len = result.len();
+        return Err(imp::Error::BufferTooSmall);
+    }
+    *ctrl_len = result.len();
+    let out = aranya_capi_core::try_as_mut_slice!(ctrl, *ctrl_len);
+    for (dst, src) in out.iter_mut().zip(result.iter()) {
+        dst.write(*src);
+    }
+
+    Ok(())
+}
+
 pub unsafe fn receive_cosmos_ctrl(
     client: &Client,
     team_id: &TeamId,

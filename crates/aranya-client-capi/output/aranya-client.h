@@ -3693,6 +3693,51 @@ AranyaError aranya_afc_receive_channel_delete_ext(const struct AranyaClient *cli
                                                   struct AranyaExtError *__ext_err);
 #endif
 
+/**
+ * Issue a COSMOS camera task command targeting a peer device.
+ *
+ * Returns an `AranyaBufferTooSmall` error if the output buffer is too small
+ * to hold the control message bytes. Writes the required length to `ctrl_len`.
+ *
+ * @param[in]  client the Aranya Client
+ * @param[in]  team_id the team's ID
+ * @param[in]  name the task name (C string)
+ * @param[in]  peer the target device's ID
+ * @param[out] ctrl output buffer for control message bytes
+ * @param[in,out] ctrl_len the number of bytes written (or required) for the ctrl buffer
+ *
+ * @relates AranyaClient.
+ */
+AranyaError aranya_task_camera(const struct AranyaClient *client,
+                               const struct AranyaTeamId *team_id,
+                               const char *name,
+                               const struct AranyaDeviceId *peer,
+                               uint8_t *ctrl,
+                               size_t *ctrl_len);
+
+/**
+ * Issue a COSMOS camera task command targeting a peer device.
+ *
+ * Returns an `AranyaBufferTooSmall` error if the output buffer is too small
+ * to hold the control message bytes. Writes the required length to `ctrl_len`.
+ *
+ * @param[in]  client the Aranya Client
+ * @param[in]  team_id the team's ID
+ * @param[in]  name the task name (C string)
+ * @param[in]  peer the target device's ID
+ * @param[out] ctrl output buffer for control message bytes
+ * @param[in,out] ctrl_len the number of bytes written (or required) for the ctrl buffer
+ *
+ * @relates AranyaClient.
+ */
+AranyaError aranya_task_camera_ext(const struct AranyaClient *client,
+                                   const struct AranyaTeamId *team_id,
+                                   const char *name,
+                                   const struct AranyaDeviceId *peer,
+                                   uint8_t *ctrl,
+                                   size_t *ctrl_len,
+                                   struct AranyaExtError *__ext_err);
+
 AranyaError aranya_receive_cosmos_ctrl(const struct AranyaClient *client,
                                        const struct AranyaTeamId *team_id,
                                        const char *name,

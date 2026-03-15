@@ -115,3 +115,4 @@ endfunction()
 
 # --- Test Executables ---
 add_capi_test(TestOnboarding test_onboarding.c DAEMON_NAMES "owner,member")
+add_capi_test(TestCosmos test_cosmos.c DAEMON_NAMES "owner,membera")
