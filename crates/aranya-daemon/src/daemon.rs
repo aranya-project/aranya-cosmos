@@ -277,12 +277,12 @@ impl Daemon {
     )> {
         let device_id = pk.ident_pk.id()?;
 
-        let client = Client::new(ClientState::new(
-            PS::new(POLICY_SOURCE, eng, store, device_id)?,
-            SP::new(
-                FileManager::new(cfg.storage_path()).context("unable to create `FileManager`")?,
-            ),
-        ));
+        let (policy, mavlink) = PS::new(POLICY_SOURCE, eng, store, device_id)?;
+        let storage_provider = SP::new(
+            FileManager::new(cfg.storage_path()).context("unable to create `FileManager`")?,
+        );
+
+        let client = Client::new(ClientState::new(policy, storage_provider));
 
         // Sync in the background at some specified interval.
         let (send_effects, recv_effects) = mpsc::channel(256);

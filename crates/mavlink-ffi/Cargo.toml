@@ -1,0 +1,20 @@
+[package]
+name = "mavlink-ffi"
+description = "MAVLink FFI"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+
+[lints]
+workspace = true
+
+
+[dependencies]
+aranya-crypto = { workspace = true }
+aranya-policy-vm = { workspace = true, features = ["derive"] }
+
+serde = { workspace = true }

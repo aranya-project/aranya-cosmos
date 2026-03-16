@@ -20,6 +20,7 @@ use aranya_runtime::{
     policy::{PolicyError, PolicyId, PolicyStore},
     FfiCallable, Sink, VmEffect, VmPolicy,
 };
+use mavlink_ffi::Ffi as MavLinkFfi;
 use tracing::instrument;
 
 use crate::{
@@ -64,7 +65,7 @@ where
         eng: CE,
         store: AranyaStore<KS>,
         device_id: DeviceId,
-    ) -> Result<Self> {
+    ) -> Result<(Self, mavlink_ffi::Handle)> {
         // compile the policy.
         let ast = parse_policy_document(policy_doc).context("unable to parse policy document")?;
         let module = Compiler::new(&ast)
@@ -75,10 +76,13 @@ where
                 EnvelopeFfi::SCHEMA,
                 IdamFfi::<Store>::SCHEMA,
                 PerspectiveFfi::SCHEMA,
+                MavLinkFfi::SCHEMA,
             ])
             .compile()
             .context("should be able to compile policy")?;
         let machine = Machine::from_module(module).context("should be able to create machine")?;
+
+        let (mavlink, handle) = MavLinkFfi::new();
 
         // select which FFI modules to use.
         let ffis: Vec<Box<dyn FfiCallable<CE> + Send + 'static>> = vec![
@@ -88,15 +92,19 @@ where
             Box::from(EnvelopeFfi),
             Box::from(IdamFfi::new(store)),
             Box::from(PerspectiveFfi),
+            Box::from(mavlink),
         ];
 
         // create an instance of the policy VM.
         let policy = VmPolicy::new(machine, eng, ffis).context("unable to create `VmPolicy`")?;
-        Ok(Self {
-            policy,
-            _eng: PhantomData,
-            _ks: PhantomData,
-        })
+        Ok((
+            Self {
+                policy,
+                _eng: PhantomData,
+                _ks: PhantomData,
+            },
+            handle,
+        ))
     }
 }
 

@@ -374,6 +374,7 @@ dependencies = [
  "derive-where",
  "divan",
  "futures-util",
+ "mavlink-ffi",
  "postcard",
  "pretty_assertions",
  "serde",
@@ -2582,6 +2583,15 @@ name = "matchit"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
+
+[[package]]
+name = "mavlink-ffi"
+version = "0.0.0"
+dependencies = [
+ "aranya-crypto",
+ "aranya-policy-vm",
+ "serde",
+]
 
 [[package]]
 name = "memchr"
