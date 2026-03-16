@@ -42,11 +42,10 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::actions::SessionData;
 #[cfg(feature = "afc")]
 use crate::afc::Afc;
 use crate::{
-    actions::Actions,
+    actions::{Actions, SessionData},
     daemon::{CE, CS, KS},
     keystore::LocalStore,
     policy::{ChanOp, Effect, Perm, PublicKeyBundle, RoleCreated},
@@ -97,6 +96,7 @@ pub(crate) struct DaemonApiServerArgs {
     pub(crate) crypto: Crypto,
     pub(crate) seed_id_dir: SeedDir,
     pub(crate) quic: Option<quic_sync::Data>,
+    pub(crate) mavlink: mavlink_ffi::Handle,
 }
 
 impl DaemonApiServer {
@@ -116,6 +116,7 @@ impl DaemonApiServer {
             crypto,
             seed_id_dir,
             quic,
+            mavlink,
         }: DaemonApiServerArgs,
     ) -> anyhow::Result<Self> {
         let listener = UnixListener::bind(&uds_path)?;
@@ -147,6 +148,7 @@ impl DaemonApiServer {
             crypto: Mutex::new(crypto),
             seed_id_dir,
             quic,
+            mavlink: Mutex::new(mavlink),
         }));
         Ok(Self {
             uds_path,
@@ -366,6 +368,7 @@ struct ApiInner {
     crypto: Mutex<Crypto>,
     seed_id_dir: SeedDir,
     quic: Option<quic_sync::Data>,
+    mavlink: Mutex<mavlink_ffi::Handle>,
 }
 
 pub(crate) struct Crypto {
