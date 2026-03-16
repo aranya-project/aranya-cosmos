@@ -34,7 +34,7 @@ For a full OpenC3 COSMOS walkthrough, see the [companion plugin repository](http
 From the repository root:
 
 ```bash
-cargo build -p aranya-daemon --release --features=aqc,afc,preview,experimental
+cargo build -p aranya-daemon --release --features=afc,preview,experimental
 ```
 
 The daemon binary will be at:

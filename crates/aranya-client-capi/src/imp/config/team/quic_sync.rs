@@ -1,14 +1,11 @@
 use core::mem::MaybeUninit;
 
-use aranya_capi_core::{
-    safe::{TypeId, Typed},
-    Builder, InvalidArg,
-};
+use aranya_capi_core::{Builder, InvalidArg};
 use aranya_daemon_api::{AddSeedMode, CreateSeedMode, SEED_IKM_SIZE};
 use tracing::error;
 
 use super::Error;
-use crate::api::defs::{self};
+use crate::api::defs;
 
 /// QUIC syncer configuration for CreateTeam() operation.
 #[derive(Clone, Debug, Default)]
@@ -30,10 +27,6 @@ impl CreateTeamQuicSyncConfig {
     pub(crate) fn imp(&self) -> Self {
         self.clone()
     }
-}
-
-impl Typed for CreateTeamQuicSyncConfig {
-    const TYPE_ID: TypeId = TypeId::new(0xADF0F971);
 }
 
 impl From<CreateTeamQuicSyncConfig> for aranya_client::CreateTeamQuicSyncConfig {
@@ -67,10 +60,6 @@ impl AddTeamQuicSyncConfig {
     }
 }
 
-impl Typed for AddTeamQuicSyncConfig {
-    const TYPE_ID: TypeId = TypeId::new(0xADF0F970);
-}
-
 impl From<AddTeamQuicSyncConfig> for aranya_client::AddTeamQuicSyncConfig {
     fn from(value: AddTeamQuicSyncConfig) -> Self {
         Self::builder()
@@ -90,7 +79,6 @@ impl CreateTeamQuicSyncConfigBuilder {
     /// Sets the PSK seed mode.
     ///
     /// This method will be removed soon since certificates will be used instead of PSKs in the future.
-    #[doc(hidden)]
     pub fn mode(&mut self, mode: CreateSeedMode) {
         self.mode = mode;
     }
@@ -127,10 +115,6 @@ impl Builder for CreateTeamQuicSyncConfigBuilder {
     }
 }
 
-impl Typed for CreateTeamQuicSyncConfigBuilder {
-    const TYPE_ID: TypeId = TypeId::new(0xEEC2FA47);
-}
-
 /// Builder for constructing an [`AddTeamQuicSyncConfig`].
 #[derive(Debug, Default)]
 pub struct AddTeamQuicSyncConfigBuilder {
@@ -141,7 +125,6 @@ impl AddTeamQuicSyncConfigBuilder {
     /// Sets the PSK seed mode.
     ///
     /// This method will be removed soon since certificates will be used instead of PSKs in the future.
-    #[doc(hidden)]
     pub fn mode(&mut self, mode: AddSeedMode) {
         self.mode = Some(mode);
     }
@@ -165,10 +148,6 @@ impl AddTeamQuicSyncConfigBuilder {
 
         Ok(())
     }
-}
-
-impl Typed for AddTeamQuicSyncConfigBuilder {
-    const TYPE_ID: TypeId = TypeId::new(0xEEC2FA48);
 }
 
 impl Builder for AddTeamQuicSyncConfigBuilder {

@@ -1,11 +1,13 @@
 #![allow(missing_docs)]
 
-use std::{fmt, marker::PhantomData, str::FromStr};
+use std::{fmt, marker::PhantomData};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use aranya_afc_util::Ffi as AfcFfi;
-use aranya_aqc_util::Ffi as AqcFfi;
-use aranya_crypto::{keystore::fs_keystore::Store, DeviceId};
+use aranya_crypto::{
+    keystore::{fs_keystore::Store, KeyStore},
+    DeviceId,
+};
 use aranya_crypto_ffi::Ffi as CryptoFfi;
 use aranya_device_ffi::FfiDevice as DeviceFfi;
 use aranya_envelope_ffi::Ffi as EnvelopeFfi;
@@ -15,31 +17,19 @@ use aranya_policy_compiler::Compiler;
 use aranya_policy_lang::lang::parse_policy_document;
 use aranya_policy_vm::{ffi::FfiModule, Machine};
 use aranya_runtime::{
-    engine::{Engine, EngineError, PolicyId},
+    policy::{PolicyError, PolicyId, PolicyStore},
     FfiCallable, Sink, VmEffect, VmPolicy,
 };
 use tracing::instrument;
 
 use crate::{
     keystore::AranyaStore,
-    policy::{ChanOp, Role},
+    policy::{ChanOp, Perm},
+    util::TryClone,
 };
 
 /// Policy loaded from policy.md file.
-pub const TEST_POLICY_1: &str = include_str!("./policy.md");
-
-/// Converts [`ChanOp`] to string.
-impl FromStr for ChanOp {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "ChanOp::RecvOnly" => Ok(Self::RecvOnly),
-            "ChanOp::SendOnly" => Ok(Self::SendOnly),
-            "ChanOp::SendRecv" => Ok(Self::SendRecv),
-            _ => Err(anyhow!("unknown `ChanOp`: {s}")),
-        }
-    }
-}
+pub(crate) const POLICY_SOURCE: &str = include_str!("./policy.md");
 
 /// Display implementation for [`ChanOp`]
 impl fmt::Display for ChanOp {
@@ -48,30 +38,37 @@ impl fmt::Display for ChanOp {
     }
 }
 
+/// Display implementation for [`Perm`]
+impl fmt::Display for Perm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Perm::{self:?}")
+    }
+}
+
 /// Engine using policy from [`policy.md`].
-pub struct PolicyEngine<E, KS> {
+pub struct PolicyEngine<CE, KS> {
     /// The underlying policy.
-    pub(crate) policy: VmPolicy<E>,
-    _eng: PhantomData<E>,
+    pub(crate) policy: VmPolicy<CE>,
+    _eng: PhantomData<CE>,
     _ks: PhantomData<KS>,
 }
 
-impl<E> PolicyEngine<E, Store>
+impl<CE, KS> PolicyEngine<CE, KS>
 where
-    E: aranya_crypto::Engine,
+    CE: aranya_crypto::Engine,
+    KS: KeyStore + TryClone + Send + 'static,
 {
     /// Creates a `PolicyEngine` from a policy document.
     pub fn new(
         policy_doc: &str,
-        eng: E,
-        store: AranyaStore<Store>,
+        eng: CE,
+        store: AranyaStore<KS>,
         device_id: DeviceId,
     ) -> Result<Self> {
         // compile the policy.
         let ast = parse_policy_document(policy_doc).context("unable to parse policy document")?;
         let module = Compiler::new(&ast)
             .ffi_modules(&[
-                AqcFfi::<Store>::SCHEMA,
                 AfcFfi::<Store>::SCHEMA,
                 CryptoFfi::<Store>::SCHEMA,
                 DeviceFfi::SCHEMA,
@@ -84,8 +81,7 @@ where
         let machine = Machine::from_module(module).context("should be able to create machine")?;
 
         // select which FFI modules to use.
-        let ffis: Vec<Box<dyn FfiCallable<E> + Send + 'static>> = vec![
-            Box::from(AqcFfi::new(store.try_clone()?)),
+        let ffis: Vec<Box<dyn FfiCallable<CE> + Send + 'static>> = vec![
             Box::from(AfcFfi::new(store.try_clone()?)),
             Box::from(CryptoFfi::new(store.try_clone()?)),
             Box::from(DeviceFfi::new(device_id)),
@@ -104,28 +100,28 @@ where
     }
 }
 
-impl<E, KS> Engine for PolicyEngine<E, KS>
+impl<CE, KS> PolicyStore for PolicyEngine<CE, KS>
 where
-    E: aranya_crypto::Engine,
+    CE: aranya_crypto::Engine,
 {
-    type Policy = VmPolicy<E>;
+    type Policy = VmPolicy<CE>;
     type Effect = VmEffect;
 
-    fn add_policy(&mut self, policy: &[u8]) -> Result<PolicyId, EngineError> {
+    fn add_policy(&mut self, policy: &[u8]) -> Result<PolicyId, PolicyError> {
         match policy.first() {
             Some(id) => Ok(PolicyId::new(*id as usize)),
-            None => Err(EngineError::Panic),
+            None => Err(PolicyError::Panic),
         }
     }
 
-    fn get_policy(&self, _id: PolicyId) -> Result<&Self::Policy, EngineError> {
+    fn get_policy(&self, _id: PolicyId) -> Result<&Self::Policy, PolicyError> {
         Ok(&self.policy)
     }
 }
 
-impl<E, KS> fmt::Debug for PolicyEngine<E, KS>
+impl<CE, KS> fmt::Debug for PolicyEngine<CE, KS>
 where
-    E: fmt::Debug,
+    CE: fmt::Debug,
     KS: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -133,26 +129,14 @@ where
     }
 }
 
-/// Converts policy [`Role`] to string.
-impl fmt::Display for Role {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Owner => f.write_str("Owner"),
-            Self::Admin => f.write_str("Admin"),
-            Self::Operator => f.write_str("Operator"),
-            Self::Member => f.write_str("Member"),
-        }
-    }
-}
-
 /// Sink for effects.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct VecSink<E> {
+pub struct VecSink<Eff> {
     /// Effects from executing a policy action.
-    pub(crate) effects: Vec<E>,
+    pub(crate) effects: Vec<Eff>,
 }
 
-impl<E> VecSink<E> {
+impl<Eff> VecSink<Eff> {
     /// Creates a new `VecSink`.
     pub(crate) const fn new() -> Self {
         Self {
@@ -161,20 +145,20 @@ impl<E> VecSink<E> {
     }
 
     /// Returns the collected effects.
-    pub(crate) fn collect<T>(self) -> Result<Vec<T>, <T as TryFrom<E>>::Error>
+    pub(crate) fn collect<T>(self) -> Result<Vec<T>, <T as TryFrom<Eff>>::Error>
     where
-        T: TryFrom<E>,
+        T: TryFrom<Eff>,
     {
         self.effects.into_iter().map(T::try_from).collect()
     }
 }
 
-impl<E> Sink<E> for VecSink<E> {
+impl<Eff> Sink<Eff> for VecSink<Eff> {
     #[instrument(skip_all)]
     fn begin(&mut self) {}
 
     #[instrument(skip_all)]
-    fn consume(&mut self, effect: E) {
+    fn consume(&mut self, effect: Eff) {
         self.effects.push(effect);
     }
 
@@ -199,6 +183,7 @@ impl MsgSink {
     }
 
     /// Returns the collected commands.
+    #[cfg(feature = "afc")]
     pub(crate) fn into_cmds(self) -> Vec<Box<[u8]>> {
         self.cmds
     }
@@ -218,4 +203,34 @@ impl Sink<&[u8]> for MsgSink {
 
     #[instrument(skip_all)]
     fn commit(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use core::convert::Infallible;
+
+    use aranya_crypto::{
+        default::{DefaultCipherSuite, DefaultEngine},
+        keystore::memstore::MemStore,
+        Rng,
+    };
+
+    use super::*;
+
+    impl TryClone for MemStore {
+        type Error = Infallible;
+
+        fn try_clone(&self) -> Result<Self, Self::Error> {
+            Ok(self.clone())
+        }
+    }
+
+    /// Tests that we can compile and build [`POLICY_SOURCE`].
+    #[test]
+    fn test_policy_compile() {
+        let (eng, _) = DefaultEngine::<_, DefaultCipherSuite>::from_entropy(Rng);
+        let store = AranyaStore::new(MemStore::new());
+        let device_id = DeviceId::default();
+        PolicyEngine::<_, _>::new(POLICY_SOURCE, eng, store, device_id).unwrap();
+    }
 }

@@ -1,3 +1,4 @@
+/build
 /target
 
 .DS_Store
@@ -8,3 +9,5 @@
 
 # CMake
 build/
+
+.claude

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use aranya_daemon_api::{AddSeedMode, CreateSeedMode, CreateTeamQuicSyncConfig};
 
 use super::*;
-use crate::sync::task::quic::PskStore;
+use crate::sync::quic::PskStore;
 
 /// Held by [`super::DaemonApiServer`] when the QUIC syncer is used
 #[derive(Debug)]
@@ -25,7 +25,7 @@ impl Api {
             .clone();
 
         let seed = match &qs_cfg.seed_mode {
-            CreateSeedMode::Generate => qs::PskSeed::new(&mut Rng, team_id),
+            CreateSeedMode::Generate => qs::PskSeed::new(Rng, team_id),
             CreateSeedMode::IKM(ikm) => qs::PskSeed::import_from_ikm(ikm, team_id),
         };
 
@@ -59,12 +59,12 @@ impl Api {
                     let crypto = &mut *self.crypto.lock().await;
                     crypto
                         .aranya_store
-                        .get_key(&mut crypto.engine, enc_id)
+                        .get_key(&crypto.engine, enc_id)
                         .context("keystore error")?
                         .context("missing enc_sk in add_team")?
                 };
 
-                let group = GroupId::from(team.into_id());
+                let group = GroupId::transmute(team);
                 let seed = enc_sk
                     .open_psk_seed(
                         &wrapped.encap_key,

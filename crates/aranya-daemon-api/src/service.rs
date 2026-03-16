@@ -1,30 +1,28 @@
 #![allow(clippy::disallowed_macros)] // tarpc uses unreachable
 
-use core::{borrow::Borrow, error, fmt, hash::Hash, net::SocketAddr, ops::Deref, time::Duration};
+use core::{error, fmt, hash::Hash, time::Duration};
 
 pub use aranya_crypto::tls::CipherSuiteId;
 use aranya_crypto::{
-    custom_id,
+    dangerous::spideroak_crypto::hex::Hex,
     default::DefaultEngine,
     id::IdError,
     subtle::{Choice, ConstantTimeEq},
     zeroize::{Zeroize, ZeroizeOnDrop},
     EncryptionPublicKey, Engine,
 };
-pub use aranya_policy_text::{text, Text};
+use aranya_id::custom_id;
+pub use aranya_policy_text::{text, InvalidText, Text};
 use aranya_util::{error::ReportExt, Addr};
 use buggy::Bug;
 pub use semver::Version;
 use serde::{Deserialize, Serialize};
 
 pub mod afc;
-pub mod aqc;
 pub mod quic_sync;
 
 #[cfg(feature = "afc")]
 pub use self::afc::*;
-#[cfg(feature = "aqc")]
-pub use self::aqc::*;
 pub use self::quic_sync::*;
 
 /// CE = Crypto Engine
@@ -55,6 +53,12 @@ impl From<Bug> for Error {
 
 impl From<anyhow::Error> for Error {
     fn from(err: anyhow::Error) -> Self {
+        Self(format!("{err:?}"))
+    }
+}
+
+impl From<InvalidText> for Error {
+    fn from(err: InvalidText) -> Self {
         Self(format!("{err:?}"))
     }
 }
@@ -92,25 +96,78 @@ custom_id! {
 }
 
 custom_id! {
-    /// An AQC label ID.
+    /// A label ID.
     pub struct LabelId;
 }
 
-/// A device's public key bundle.
+custom_id! {
+    /// A role ID.
+    pub struct RoleId;
+}
+
+custom_id! {
+    /// An identifier for any object with a unique Aranya ID defined in the policy.
+    pub struct ObjectId;
+}
+
+/// A numerical rank used for authorization in the rank-based hierarchy.
+///
+/// Higher-ranked objects can operate on lower-ranked objects.
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct Rank(i64);
+
+impl Rank {
+    /// Creates a new rank from a raw value.
+    pub const fn new(value: i64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the raw rank value.
+    pub const fn value(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for Rank {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<i64> for Rank {
+    fn from(value: i64) -> Self {
+        Self::new(value)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct KeyBundle {
+pub struct Role {
+    /// Uniquely identifies the role.
+    pub id: RoleId,
+    /// The role's friendly name.
+    pub name: Text,
+    /// The author of the role.
+    pub author_id: DeviceId,
+    /// Is this a default role?
+    pub default: bool,
+}
+
+/// A device's public key bundle.
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct PublicKeyBundle {
     pub identity: Vec<u8>,
     pub signing: Vec<u8>,
     pub encryption: Vec<u8>,
 }
 
-/// A device's role on the team.
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub enum Role {
-    Owner,
-    Admin,
-    Operator,
-    Member,
+impl fmt::Debug for PublicKeyBundle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublicKeyBundle")
+            .field("identity", &Hex::new(&*self.identity))
+            .field("signing", &Hex::new(&*self.signing))
+            .field("encryption", &Hex::new(&*self.encryption))
+            .finish()
+    }
 }
 
 // Note: any fields added to this type should be public
@@ -128,41 +185,12 @@ pub struct CreateTeamConfig {
     pub quic_sync: Option<CreateTeamQuicSyncConfig>,
 }
 
-/// A device's network identifier.
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
-pub struct NetIdentifier(pub Text);
-
-impl Borrow<str> for NetIdentifier {
-    #[inline]
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<T> AsRef<T> for NetIdentifier
-where
-    T: ?Sized,
-    <Self as Deref>::Target: AsRef<T>,
-{
-    #[inline]
-    fn as_ref(&self) -> &T {
-        self.deref().as_ref()
-    }
-}
-
-impl Deref for NetIdentifier {
-    type Target = str;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl fmt::Display for NetIdentifier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
+/// A label.
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct Label {
+    pub id: LabelId,
+    pub name: Text,
+    pub author_id: DeviceId,
 }
 
 /// A PSK IKM.
@@ -245,10 +273,14 @@ impl fmt::Debug for Secret {
 /// Configuration values for syncing with a peer
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncPeerConfig {
-    /// The interval at which syncing occurs
-    pub interval: Duration,
-    /// Determines if a peer should be synced with immediately after they're added
+    /// The interval at which syncing occurs. If None, the peer will not be periodically synced.
+    pub interval: Option<Duration>,
+    /// Determines whether the peer will be scheduled for an immediate sync when added.
     pub sync_now: bool,
+    /// Determines if the peer should be synced with when a hello message is received
+    /// indicating they have a head that we don't have
+    #[cfg(feature = "preview")]
+    pub sync_on_hello: bool,
 }
 
 /// Valid channel operations for a label assignment.
@@ -260,64 +292,132 @@ pub enum ChanOp {
     /// The device can only send data in channels with this
     /// label.
     SendOnly,
-    /// The device can send and receive data in channels with this
+    /// The device can send or receive data in channels with this
     /// label.
     SendRecv,
 }
 
-/// A label.
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct Label {
-    pub id: LabelId,
-    pub name: Text,
+/// Permissions that can be granted to a role.
+///
+/// # Stability
+///
+/// New permissions may be added to the end of this enum without breaking
+/// backward compatibility. Existing permissions will not be removed or
+/// renamed.
+///
+/// # Deprecation
+///
+/// Deprecated variants are marked with `#[deprecated]` and will emit
+/// compiler warnings when used. They remain in the enum for backward
+/// compatibility — see the deprecation note on each variant for the
+/// migration path.
+// This enum is re-exported as `aranya_client::Permission`. New
+// permissions may be added as the policy evolves, so `non_exhaustive`
+// ensures downstream match statements continue to compile.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum Perm {
+    // # Team management
+    //
+    // The role can add a device to the team.
+    AddDevice,
+    // The role can remove a device from the team.
+    RemoveDevice,
+    // The role can terminate the team.
+    TerminateTeam,
+
+    // # Rank
+    //
+    // The role can change the rank of objects.
+    ChangeRank,
+
+    // # Roles
+    //
+    // The role can create a role.
+    CreateRole,
+    // The role can delete a role.
+    DeleteRole,
+    // The role can assign a role to other devices.
+    AssignRole,
+    // The role can revoke a role from other devices.
+    RevokeRole,
+    // The role can change permissions on roles.
+    ChangeRolePerms,
+    // The role can set up default roles.
+    SetupDefaultRole,
+
+    // # Labels
+    //
+    // The role can create a label.
+    CreateLabel,
+    // The role can delete a label.
+    DeleteLabel,
+    // The role can assign a label to a device.
+    AssignLabel,
+    // The role can revoke a label from a device.
+    RevokeLabel,
+
+    // # AFC
+    //
+    // The role can use AFC.
+    CanUseAfc,
+    // The role can create a unidirectional AFC channel.
+    CreateAfcUniChannel,
 }
 
 // TODO(jdygert): tarpc does not cfg return types properly.
-#[cfg(not(feature = "aqc"))]
-use aqc_stub::{AqcBidiPsks, AqcCtrl, AqcPsks, AqcUniPsks};
-#[cfg(not(feature = "aqc"))]
-mod aqc_stub {
-    #[derive(Debug, serde::Serialize, serde::Deserialize)]
-    pub enum Never {}
-    pub type AqcCtrl = Never;
-    pub type AqcPsks = Never;
-    pub type AqcBidiPsks = Never;
-    pub type AqcUniPsks = Never;
-}
 #[cfg(not(feature = "afc"))]
-use afc_stub::{AfcChannelId, AfcCtrl, AfcShmInfo};
+use afc_stub::{AfcReceiveChannelInfo, AfcSendChannelInfo, AfcShmInfo};
 #[cfg(not(feature = "afc"))]
 mod afc_stub {
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
     pub enum Never {}
-    pub type AfcCtrl = Never;
     pub type AfcShmInfo = Never;
-    pub type AfcChannelId = Never;
+    pub type AfcSendChannelInfo = Never;
+    pub type AfcReceiveChannelInfo = Never;
 }
 
 #[tarpc::service]
 pub trait DaemonApi {
+    //
+    // Misc
+    //
+
     /// Returns the daemon's version.
     async fn version() -> Result<Version>;
-
     /// Gets local address the Aranya sync server is bound to.
-    async fn aranya_local_addr() -> Result<SocketAddr>;
+    async fn aranya_local_addr() -> Result<Addr>;
 
     /// Gets the public key bundle for this device
-    async fn get_key_bundle() -> Result<KeyBundle>;
-
+    async fn get_public_key_bundle() -> Result<PublicKeyBundle>;
     /// Gets the public device id.
     async fn get_device_id() -> Result<DeviceId>;
 
+    //
+    // Syncing
+    //
+
     /// Adds the peer for automatic periodic syncing.
     async fn add_sync_peer(addr: Addr, team: TeamId, config: SyncPeerConfig) -> Result<()>;
-
     /// Sync with peer immediately.
     async fn sync_now(addr: Addr, team: TeamId, cfg: Option<SyncPeerConfig>) -> Result<()>;
 
+    /// Subscribe to hello notifications from a sync peer.
+    #[cfg(feature = "preview")]
+    async fn sync_hello_subscribe(
+        peer: Addr,
+        team: TeamId,
+        graph_change_debounce: Duration,
+        duration: Duration,
+        schedule_delay: Duration,
+    ) -> Result<()>;
+
+    /// Unsubscribe from hello notifications from a sync peer.
+    #[cfg(feature = "preview")]
+    async fn sync_hello_unsubscribe(peer: Addr, team: TeamId) -> Result<()>;
+
     /// Removes the peer from automatic syncing.
     async fn remove_sync_peer(addr: Addr, team: TeamId) -> Result<()>;
-
     /// add a team to the local device store that was created by someone else. Not an aranya action/command.
     async fn add_team(cfg: AddTeamConfig) -> Result<()>;
 
@@ -329,121 +429,143 @@ pub trait DaemonApi {
     /// Close the team.
     async fn close_team(team: TeamId) -> Result<()>;
 
+    /// Encrypts the team's syncing PSK(s) for the peer.
     async fn encrypt_psk_seed_for_peer(
         team: TeamId,
         peer_enc_pk: EncryptionPublicKey<CS>,
     ) -> Result<WrappedSeed>;
 
-    /// Add device to the team.
-    async fn add_device_to_team(team: TeamId, keys: KeyBundle) -> Result<()>;
+    //
+    // Device onboarding
+    //
+
+    /// Adds a device to the team with an optional initial role and
+    /// explicit rank.
+    async fn add_device_to_team(
+        team: TeamId,
+        keys: PublicKeyBundle,
+        initial_role: Option<RoleId>,
+        rank: Rank,
+    ) -> Result<()>;
     /// Remove device from the team.
     async fn remove_device_from_team(team: TeamId, device: DeviceId) -> Result<()>;
+    /// Returns all the devices on the team.
+    async fn devices_on_team(team: TeamId) -> Result<Box<[DeviceId]>>;
+    /// Returns the device's public key bundle.
+    async fn device_public_key_bundle(team: TeamId, device: DeviceId) -> Result<PublicKeyBundle>;
+
+    //
+    // Role creation
+    //
+
+    /// Configures the team with default roles from policy.
+    ///
+    /// It returns the default roles that were created.
+    async fn setup_default_roles(team: TeamId) -> Result<Box<[Role]>>;
+    /// Creates a new role with the given rank.
+    async fn create_role(team: TeamId, role_name: Text, rank: Rank) -> Result<Role>;
+    /// Deletes a role.
+    async fn delete_role(team: TeamId, role_id: RoleId) -> Result<()>;
+    /// Returns the current team roles.
+    async fn team_roles(team: TeamId) -> Result<Box<[Role]>>;
+
+    //
+    // Role management
+    //
+
+    /// Adds a permission to a role.
+    async fn add_perm_to_role(team: TeamId, role: RoleId, perm: Perm) -> Result<()>;
+    /// Removes a permission from a role.
+    async fn remove_perm_from_role(team: TeamId, role: RoleId, perm: Perm) -> Result<()>;
+    /// Queries all permissions assigned to a role.
+    async fn query_role_perms(team: TeamId, role: RoleId) -> Result<Vec<Perm>>;
+    /// Changes the rank of an object (device or label).
+    ///
+    /// Note: Role ranks cannot be changed after creation. This maintains the
+    /// invariant that `role_rank > device_rank` for all devices assigned to
+    /// the role. To effectively change a role's rank, create a new role with
+    /// matching permissions at the desired rank, assign the new role to the
+    /// devices that had the old role, then delete the old role.
+    async fn change_rank(
+        team: TeamId,
+        object_id: ObjectId,
+        old_rank: Rank,
+        new_rank: Rank,
+    ) -> Result<()>;
+    /// Queries the rank of an object.
+    async fn query_rank(team: TeamId, object_id: ObjectId) -> Result<Rank>;
+
+    //
+    // Role assignment
+    //
 
     /// Assign a role to a device.
-    async fn assign_role(team: TeamId, device: DeviceId, role: Role) -> Result<()>;
+    async fn assign_role(team: TeamId, device: DeviceId, role: RoleId) -> Result<()>;
     /// Revoke a role from a device.
-    async fn revoke_role(team: TeamId, device: DeviceId, role: Role) -> Result<()>;
-
-    // Create a label.
-    async fn create_label(team: TeamId, name: Text) -> Result<LabelId>;
-    // Delete a label.
-    async fn delete_label(team: TeamId, label_id: LabelId) -> Result<()>;
-    // Assign a label to a device.
-    async fn assign_label(
+    async fn revoke_role(team: TeamId, device: DeviceId, role: RoleId) -> Result<()>;
+    /// Changes the assigned role of a device.
+    async fn change_role(
         team: TeamId,
         device: DeviceId,
-        label_id: LabelId,
+        old_role: RoleId,
+        new_role: RoleId,
+    ) -> Result<()>;
+    /// Returns the role assigned to the device.
+    async fn device_role(team: TeamId, device: DeviceId) -> Result<Option<Role>>;
+
+    //
+    // Label creation
+    //
+
+    /// Creates a label with an explicit rank.
+    async fn create_label(team: TeamId, name: Text, rank: Rank) -> Result<LabelId>;
+    /// Delete a label.
+    async fn delete_label(team: TeamId, label_id: LabelId) -> Result<()>;
+    /// Returns a specific label.
+    async fn label(team: TeamId, label: LabelId) -> Result<Option<Label>>;
+    /// Returns all labels on the team.
+    async fn labels(team: TeamId) -> Result<Vec<Label>>;
+
+    //
+    // Label assignments
+    //
+
+    /// Assigns a label to a device.
+    async fn assign_label_to_device(
+        team: TeamId,
+        device: DeviceId,
+        label: LabelId,
         op: ChanOp,
     ) -> Result<()>;
-    // Revoke a label from a device.
-    async fn revoke_label(team: TeamId, device: DeviceId, label_id: LabelId) -> Result<()>;
-
-    /// Assign a QUIC channels network identifier to a device.
-    #[cfg(feature = "aqc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "aqc")))]
-    async fn assign_aqc_net_identifier(
-        team: TeamId,
-        device: DeviceId,
-        name: NetIdentifier,
-    ) -> Result<()>;
-    /// Remove a QUIC channels network identifier from a device.
-    #[cfg(feature = "aqc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "aqc")))]
-    async fn remove_aqc_net_identifier(
-        team: TeamId,
-        device: DeviceId,
-        name: NetIdentifier,
-    ) -> Result<()>;
-    /// Create a bidirectional QUIC channel.
-    #[cfg(feature = "aqc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "aqc")))]
-    async fn create_aqc_bidi_channel(
-        team: TeamId,
-        peer: NetIdentifier,
-        label_id: LabelId,
-    ) -> Result<(AqcCtrl, AqcBidiPsks)>;
-    /// Create a unidirectional QUIC channel.
-    #[cfg(feature = "aqc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "aqc")))]
-    async fn create_aqc_uni_channel(
-        team: TeamId,
-        peer: NetIdentifier,
-        label_id: LabelId,
-    ) -> Result<(AqcCtrl, AqcUniPsks)>;
-    /// Delete a QUIC bidi channel.
-    #[cfg(feature = "aqc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "aqc")))]
-    async fn delete_aqc_bidi_channel(chan: AqcBidiChannelId) -> Result<AqcCtrl>;
-    /// Delete a QUIC uni channel.
-    #[cfg(feature = "aqc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "aqc")))]
-    async fn delete_aqc_uni_channel(chan: AqcUniChannelId) -> Result<AqcCtrl>;
-    /// Receive AQC ctrl message.
-    #[cfg(feature = "aqc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "aqc")))]
-    async fn receive_aqc_ctrl(team: TeamId, ctrl: AqcCtrl) -> Result<(LabelId, AqcPsks)>;
+    /// Revokes a label from a device.
+    async fn revoke_label_from_device(team: TeamId, device: DeviceId, label: LabelId)
+        -> Result<()>;
+    /// Returns all labels assigned to the device.
+    async fn labels_assigned_to_device(team: TeamId, device: DeviceId) -> Result<Box<[Label]>>;
 
     /// Gets AFC shared-memory configuration info.
     #[cfg(feature = "afc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "afc")))]
     async fn afc_shm_info() -> Result<AfcShmInfo>;
-    /// Create a unidirectional AFC send-only channel.
+    /// Create a send-only AFC channel.
     #[cfg(feature = "afc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "afc")))]
-    async fn create_afc_uni_send_channel(
+    async fn create_afc_channel(
         team: TeamId,
         peer_id: DeviceId,
         label_id: LabelId,
-    ) -> Result<(AfcCtrl, AfcChannelId)>;
+    ) -> Result<AfcSendChannelInfo>;
     /// Delete a AFC channel.
     #[cfg(feature = "afc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "afc")))]
-    async fn delete_afc_channel(chan: AfcChannelId) -> Result<()>;
-    /// Receive AFC ctrl message.
+    async fn delete_afc_channel(chan: AfcLocalChannelId) -> Result<()>;
+    /// Accept a receive-only AFC channel by processing a peer's ctrl message.
     #[cfg(feature = "afc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "afc")))]
-    async fn receive_afc_ctrl(team: TeamId, ctrl: AfcCtrl) -> Result<(LabelId, AfcChannelId)>;
+    async fn accept_afc_channel(team: TeamId, ctrl: AfcCtrl) -> Result<AfcReceiveChannelInfo>;
 
+    /// Issue a COSMOS camera task command.
     async fn task_camera(team: TeamId, task_name: Text, peer: DeviceId) -> Result<Box<[u8]>>;
+    /// Receive and verify a COSMOS control message.
     async fn receive_cosmos_ctrl(team: TeamId, task_name: Text, ctrl: Box<[u8]>) -> Result<()>;
-
-    /// Query devices on team.
-    async fn query_devices_on_team(team: TeamId) -> Result<Vec<DeviceId>>;
-    /// Query device role.
-    async fn query_device_role(team: TeamId, device: DeviceId) -> Result<Role>;
-    /// Query device keybundle.
-    async fn query_device_keybundle(team: TeamId, device: DeviceId) -> Result<KeyBundle>;
-    /// Query device label assignments.
-    async fn query_device_label_assignments(team: TeamId, device: DeviceId) -> Result<Vec<Label>>;
-    /// Query AQC network ID.
-    #[cfg(feature = "aqc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "aqc")))]
-    async fn query_aqc_net_identifier(
-        team: TeamId,
-        device: DeviceId,
-    ) -> Result<Option<NetIdentifier>>;
-    // Query labels on team.
-    async fn query_labels(team: TeamId) -> Result<Vec<Label>>;
-    /// Query whether a label exists.
-    async fn query_label_exists(team: TeamId, label: LabelId) -> Result<bool>;
 }

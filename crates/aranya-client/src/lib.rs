@@ -26,26 +26,27 @@
 #[cfg(not(feature = "default"))]
 compile_error!("'default' feature must be enabled!");
 
-#[cfg(all(feature = "aqc", not(feature = "experimental")))]
-compile_error!(
-    "AQC is currently experimental. Enable the 'experimental' feature to opt into experimental APIs."
-);
-
-#[cfg(all(feature = "afc", not(feature = "preview")))]
-compile_error!(
-    "AFC is currently a preview feature. Enable the 'preview' feature to opt into preview APIs."
-);
-
-#[cfg(feature = "afc")]
 pub mod afc;
-pub mod aqc;
 pub mod client;
 pub mod config;
 pub mod error;
+mod util;
+
+pub use aranya_policy_text::{text, Text};
+pub use aranya_util::Addr;
 
 #[doc(inline)]
+pub use crate::client::Permission;
+#[cfg(feature = "preview")]
+#[cfg_attr(docsrs, doc(cfg(feature = "preview")))]
+#[doc(inline)]
+pub use crate::config::{HelloSubscriptionConfig, HelloSubscriptionConfigBuilder};
+#[doc(inline)]
 pub use crate::{
-    client::{Client, DeviceId, LabelId, Team, TeamId},
+    client::{
+        ChanOp, Client, Device, DeviceId, Devices, Label, LabelId, Labels, ObjectId,
+        PublicKeyBundle, Rank, Role, RoleId, Roles, Team, TeamId,
+    },
     config::{
         AddTeamConfig, AddTeamConfigBuilder, AddTeamQuicSyncConfig, CreateTeamConfig,
         CreateTeamConfigBuilder, CreateTeamQuicSyncConfig, CreateTeamQuicSyncConfigBuilder,

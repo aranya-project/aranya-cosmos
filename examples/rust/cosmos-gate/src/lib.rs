@@ -1,5 +1,4 @@
 use std::{
-    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -8,16 +7,15 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use aranya_client::{
-    client::{Client, DeviceId, KeyBundle},
+    client::{Client, DeviceId, PublicKeyBundle, Rank},
     AddTeamConfig, AddTeamQuicSyncConfig, CreateTeamConfig, CreateTeamQuicSyncConfig,
     SyncPeerConfig, TeamId,
 };
 use aranya_policy_text::Text;
 use aranya_util::Addr;
-use axum::http::header::CONTENT_TYPE;
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header::CONTENT_TYPE, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -25,8 +23,12 @@ use axum::{
 use backon::{ExponentialBuilder, Retryable};
 use rustix::shm;
 use serde::Deserialize;
-use tokio::{fs, process::Child, process::Command, time::sleep};
-use tracing::{debug, info};
+use tokio::{
+    fs,
+    process::{Child, Command},
+    time::sleep,
+};
+use tracing::{debug, info, warn};
 
 #[derive(Clone, Debug)]
 pub struct DaemonPath(pub PathBuf);
@@ -34,14 +36,13 @@ pub struct DaemonPath(pub PathBuf);
 #[derive(Debug)]
 #[clippy::has_significant_drop]
 pub struct Daemon {
-    // NB: This has important drop side effects.
+    // NB: `Child` with `kill_on_drop(true)` kills the process when dropped.
     _proc: Child,
-    _work_dir: PathBuf,
 }
 
 impl Daemon {
     pub async fn spawn(path: &DaemonPath, user_name: &str, work_dir: &Path) -> Result<Self> {
-        fs::create_dir_all(&work_dir).await?;
+        fs::create_dir_all(work_dir).await?;
 
         // Prepare daemon dirs and config.
         let shm = format!("/shm_{}", user_name);
@@ -69,8 +70,6 @@ impl Daemon {
             logs_dir = {logs_dir:?}
             config_dir = {config_dir:?}
 
-            aqc.enable = true
-
             [afc]
             enable = true
             shm_path = {shm:?}
@@ -91,19 +90,15 @@ impl Daemon {
             .args(["--config", cfg_path]);
         debug!(?cmd, "spawning daemon");
         let proc = cmd.spawn().context("unable to spawn daemon")?;
-        Ok(Daemon {
-            _proc: proc,
-            _work_dir: work_dir.into(),
-        })
+        Ok(Daemon { _proc: proc })
     }
 }
 
 pub struct ClientCtx {
     pub client: Arc<Client>,
-    pub pk: KeyBundle,
+    pub pk: PublicKeyBundle,
     pub id: DeviceId,
-    // keep daemon alive
-    _work_dir: PathBuf,
+    // Dropping kills the daemon process via `Child::kill_on_drop`.
     _daemon: Daemon,
 }
 
@@ -121,20 +116,14 @@ impl ClientCtx {
         sleep(Duration::from_millis(100)).await;
 
         // Connect client.
-        let any_addr = Addr::from((Ipv4Addr::LOCALHOST, 0));
-        let client = (|| {
-            Client::builder()
-                .daemon_uds_path(&uds_sock)
-                .aqc_server_addr(&any_addr)
-                .connect()
-        })
-        .retry(ExponentialBuilder::default())
-        .await
-        .context("unable to initialize client")?;
+        let client = (|| Client::builder().with_daemon_uds_path(&uds_sock).connect())
+            .retry(ExponentialBuilder::default())
+            .await
+            .context("unable to initialize client")?;
 
         // Fetch client identity info.
         let pk = client
-            .get_key_bundle()
+            .get_public_key_bundle()
             .await
             .context("expected key bundle")?;
         let id = client.get_device_id().await.context("expected device id")?;
@@ -143,24 +132,21 @@ impl ClientCtx {
             client: Arc::new(client),
             pk,
             id,
-            _work_dir: work_dir,
             _daemon: daemon,
         })
     }
 
-    pub async fn aranya_local_addr(&self) -> Result<SocketAddr> {
+    pub async fn aranya_local_addr(&self) -> Result<Addr> {
         Ok(self.client.local_addr().await?)
     }
 }
 
-// Convenience helpers for state files.
 pub fn init_marker_path(owner_dir: &Path) -> PathBuf {
     owner_dir.join(".aranya_initialized")
 }
 pub fn team_id_path(owner_dir: &Path) -> PathBuf {
     owner_dir.join(".aranya_team_id")
 }
-// NEW: member_id file path and reader
 pub fn member_id_path(owner_dir: &Path) -> PathBuf {
     owner_dir.join(".aranya_member_id")
 }
@@ -185,7 +171,6 @@ pub async fn read_team_id(path: &Path) -> Result<TeamId> {
 pub struct AppState {
     pub owner: Arc<Client>,
     pub owner_team_id: TeamId,
-    // REPLACED: was `target_member: Arc<Client>`
     pub target_member_id: DeviceId,
 }
 
@@ -207,7 +192,7 @@ where
     struct HexVisitor;
     impl<'de> serde::de::Visitor<'de> for HexVisitor {
         type Value = u16;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(
                 f,
                 "a hex string (e.g., \"0x1A2B\" or \"1A2B\") or a number 0-65535"
@@ -241,38 +226,25 @@ where
 }
 
 pub async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSummary>) -> Response {
-    // Minimal echo; extend to use `ClientCtx` if needed.
     info!(
-        "received POST /authorize: keycloak_id={} target={} packet_name={} stream_id=0x{:04X} function_code={}",
-        &body.keycloak_id,
-        &body.target,
-        &body.packet_name,
-        body.stream_id,
-        body.function_code
+        keycloak_id = %body.keycloak_id,
+        target = %body.target,
+        packet_name = %body.packet_name,
+        stream_id = format_args!("0x{:04X}", body.stream_id),
+        function_code = body.function_code,
+        "received POST /authorize"
     );
 
     let owner_team = state.owner.team(state.owner_team_id);
-    // TODO: make task lowercase
     let task_name = Text::try_from(body.packet_name.clone())
-        .unwrap_or_else(|_| Text::from_str("unknown").unwrap());
-
-    // Simplify: use persisted member id instead of a live client
-    info!(
-        "owner_id: {}, owner_team_id: {}",
-        state.owner.get_device_id().await.unwrap(),
-        state.owner_team_id
-    );
-    info!(
-        "issuing task_camera to target client id: {}",
-        state.target_member_id
-    );
+        .unwrap_or_else(|_| Text::from_str("unknown").expect("valid text"));
 
     match owner_team
         .task_camera(task_name, state.target_member_id)
         .await
     {
         Ok(serialized_cmd) => {
-            info!("serialized_cmd produced: {} bytes", serialized_cmd.len());
+            info!(len = serialized_cmd.len(), "produced command bytes");
             (
                 StatusCode::OK,
                 [(CONTENT_TYPE, "application/octet-stream")],
@@ -281,7 +253,7 @@ pub async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSumm
                 .into_response()
         }
         Err(e) => {
-            info!("task_camera failed: {e}");
+            warn!(error = %e, "task_camera failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to produce command bytes".to_string(),
@@ -299,10 +271,9 @@ pub fn build_router(state: AppState) -> Router {
 
 pub async fn initialize_or_return(
     owner: &ClientCtx,
-    _member: &ClientCtx,
+    member: &ClientCtx,
     init_marker: &Path,
     team_id_path: &Path,
-    // NEW ARG: path to persist member_id
     member_id_path: &Path,
     already_initialized: bool,
 ) -> Result<TeamId> {
@@ -337,6 +308,15 @@ pub async fn initialize_or_return(
     let team_id = owner_team.team_id();
     info!(%team_id, "team created");
 
+    // Setup default roles (admin, operator, member).
+    info!("creating default roles");
+    let roles = owner_team.setup_default_roles().await?;
+    let member_role = roles
+        .iter()
+        .find(|r| r.name == "member")
+        .context("no member role")?
+        .clone();
+
     // Onboard member.
     let add_team_cfg = {
         let qs_cfg = AddTeamQuicSyncConfig::builder()
@@ -347,32 +327,49 @@ pub async fn initialize_or_return(
             .team_id(team_id)
             .build()?
     };
-    let member_team = _member.client.add_team(add_team_cfg).await?;
-    owner_team.add_device_to_team(_member.pk.clone()).await?;
+    let member_team = member.client.add_team(add_team_cfg).await?;
+    let member_role_rank = owner_team.query_rank(member_role.id).await?;
+    owner_team
+        .add_device(
+            member.pk.clone(),
+            None,
+            Rank::new(member_role_rank.value().saturating_sub(1)),
+        )
+        .await?;
     info!("member added to team");
+
+    // Assign member role.
+    owner_team
+        .device(member.id)
+        .assign_role(member_role.id)
+        .await?;
+    info!("member role assigned");
 
     // Setup sync peers.
     let sync_interval = Duration::from_millis(400);
     let sync_cfg = SyncPeerConfig::builder().interval(sync_interval).build()?;
     let owner_addr = owner.aranya_local_addr().await?;
-    let member_addr = _member.aranya_local_addr().await?;
+    let member_addr = member.aranya_local_addr().await?;
     owner_team
-        .add_sync_peer((member_addr).into(), sync_cfg.clone())
+        .add_sync_peer(member_addr, sync_cfg.clone())
         .await?;
     member_team
-        .add_sync_peer((owner_addr).into(), sync_cfg.clone())
+        .add_sync_peer(owner_addr, sync_cfg.clone())
         .await?;
 
-    // One way to make sure member receives the team info is to trigger a sync from member to owner.
-    member_team.sync_now(member_addr.into(), None).await?;
+    // Let background sync settle before triggering a one-shot sync.
+    sleep(sync_interval + Duration::from_millis(100)).await;
+
+    // Sync bidirectionally so both devices see each other's state.
+    owner_team.sync_now(member_addr, None).await?;
+    member_team.sync_now(owner_addr, None).await?;
 
     info!("onboarding complete");
 
-    // Mark initialization complete.
+    // Persist initialization state.
     fs::write(init_marker, b"initialized").await?;
     fs::write(team_id_path, team_id.to_string()).await?;
-    // NEW: persist member id
-    fs::write(member_id_path, _member.id.to_string()).await?;
+    fs::write(member_id_path, member.id.to_string()).await?;
     info!("wrote init marker, team_id, and member_id files");
 
     Ok(team_id)

@@ -3,14 +3,14 @@ use core::fmt;
 use anyhow::{Context, Result};
 use aranya_crypto::{
     CipherSuite, DeviceId, EncryptionKey, EncryptionKeyId, EncryptionPublicKey, Engine,
-    IdentityKey, IdentityVerifyingKey, KeyStore, KeyStoreExt, SigningKey, SigningKeyId,
+    IdentityKey, IdentityVerifyingKey, KeyStore, KeyStoreExt as _, SigningKey, SigningKeyId,
     VerifyingKey,
 };
 use serde::{Deserialize, Serialize};
 
 /// A bundle of cryptographic keys for secure communication in Aranya.
 ///
-/// A KeyBundle contains identifiers for three types of keys:
+/// A PublicKeyBundle contains identifiers for three types of keys:
 /// - Device identity key: Used to identify a device in an Aranya team. A device's ID
 ///   is derived from the public portion of the device identity key. The device key is
 ///   used for digital signatures allowing others to verify signatures created with this key.
@@ -28,21 +28,21 @@ use serde::{Deserialize, Serialize};
 /// ```
 /// # use anyhow::Result;
 /// # use aranya_crypto::{Engine, KeyStore};
-/// # use aranya_keygen::KeyBundle;
+/// # use aranya_keygen::PublicKeyBundle;
 /// #
-/// # fn example<E, S>(engine: &mut E, store: &mut S) -> Result<()>
+/// # fn example<CE, KS>(engine: &CE, store: &mut KS) -> Result<()>
 /// # where
-/// #     E: Engine,
-/// #     S: KeyStore,
+/// #     CE: Engine,
+/// #     KS: KeyStore,
 /// # {
 /// // Generate a new key bundle and store the keys in the keystore
-/// let key_bundle = KeyBundle::generate(engine, store)?;
+/// let key_bundle = PublicKeyBundle::generate(engine, store)?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct KeyBundle {
+pub struct PublicKeyBundle {
     /// Device identifier derived from the identity key.
     ///
     /// This ID uniquely identifies the device in the Aranya team.
@@ -68,9 +68,9 @@ pub struct KeyBundle {
     pub sign_id: SigningKeyId,
 }
 
-/// Collection of public keys derived from a [`KeyBundle`].
+/// Collection of public keys derived from a [`PublicKeyBundle`].
 ///
-/// This structure contains the public portions of the keys referenced in a KeyBundle.
+/// This structure contains the public portions of the keys referenced in a PublicKeyBundle.
 /// These public keys can be shared with other devices for secure communication.
 ///
 /// - `ident_pk`: Public identity key for device identification
@@ -93,17 +93,17 @@ pub struct PublicKeys<CS: CipherSuite> {
     pub sign_pk: VerifyingKey<CS>,
 }
 
-impl KeyBundle {
+impl PublicKeyBundle {
     /// Generates a new key bundle with fresh cryptographic keys.
     ///
     /// This method creates new identity, encryption, and signing keys using the provided
-    /// engine, wraps them, and stores them in the provided key store. It returns a KeyBundle
+    /// engine, wraps them, and stores them in the provided key store. It returns a PublicKeyBundle
     /// that contains references to these stored keys.
     ///
     /// # Type Parameters
     ///
-    /// * `E` - The cryptographic engine implementation
-    /// * `S` - The key store implementation
+    /// * `CE` - The cryptographic engine implementation
+    /// * `KS` - The key store implementation
     ///
     /// # Arguments
     ///
@@ -112,7 +112,7 @@ impl KeyBundle {
     ///
     /// # Returns
     ///
-    /// A Result containing the new KeyBundle if successful, or an error if key generation,
+    /// A Result containing the new PublicKeyBundle if successful, or an error if key generation,
     /// wrapping, or storage fails.
     ///
     /// # Example
@@ -120,35 +120,30 @@ impl KeyBundle {
     /// ```
     /// # use anyhow::Result;
     /// # use aranya_crypto::{Engine, KeyStore};
-    /// # use aranya_keygen::KeyBundle;
+    /// # use aranya_keygen::PublicKeyBundle;
     /// #
-    /// # fn example<E, S>(engine: &mut E, store: &mut S) -> Result<()>
+    /// # fn example<CE, KS>(engine: &CE, store: &mut KS) -> Result<()>
     /// # where
-    /// #     E: Engine,
-    /// #     S: KeyStore,
+    /// #     CE: Engine,
+    /// #     KS: KeyStore,
     /// # {
-    /// let key_bundle = KeyBundle::generate(engine, store)?;
+    /// let key_bundle = PublicKeyBundle::generate(engine, store)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn generate<E, S>(eng: &mut E, store: &mut S) -> Result<Self>
+    pub fn generate<CE, KS>(eng: &CE, store: &mut KS) -> Result<Self>
     where
-        E: Engine,
-        S: KeyStore,
+        CE: Engine,
+        KS: KeyStore,
     {
         macro_rules! gen {
             ($key:ident) => {{
-                let sk = $key::<E::CS>::new(eng);
-                let id = sk.id()?;
-                let wrapped =
-                    eng.wrap(sk)
-                        .context(concat!("unable to wrap `", stringify!($key), "`"))?;
-                store.try_insert(id.into(), wrapped).context(concat!(
-                    "unable to insert wrapped `",
+                let sk = $key::<CE::CS>::new(eng);
+                store.insert_key(eng, sk).context(concat!(
+                    "unable to insert `",
                     stringify!($key),
                     "`"
-                ))?;
-                id
+                ))?
             }};
         }
         Ok(Self {
@@ -160,13 +155,13 @@ impl KeyBundle {
 
     /// Loads the public keys associated with this key bundle.
     ///
-    /// This method loads the keys referenced by this KeyBundle from the provided key store,
+    /// This method loads the keys referenced by this PublicKeyBundle from the provided key store,
     /// extracts their public portions, and returns them in a PublicKeys structure.
     ///
     /// # Type Parameters
     ///
-    /// * `E` - The cryptographic engine implementation
-    /// * `S` - The key store implementation
+    /// * `CE` - The cryptographic engine implementation
+    /// * `KS` - The key store implementation
     ///
     /// # Arguments
     ///
@@ -183,36 +178,36 @@ impl KeyBundle {
     /// ```
     /// # use anyhow::Result;
     /// # use aranya_crypto::{Engine, KeyStore};
-    /// # use aranya_keygen::KeyBundle;
+    /// # use aranya_keygen::PublicKeyBundle;
     /// #
-    /// # fn example<E, S>(engine: &mut E, store: &mut S) -> Result<()>
+    /// # fn example<CE, KS>(engine: &CE, store: &mut KS) -> Result<()>
     /// # where
-    /// #     E: Engine,
-    /// #     S: KeyStore,
+    /// #     CE: Engine,
+    /// #     KS: KeyStore,
     /// # {
-    /// let key_bundle = KeyBundle::generate(engine, store)?;
+    /// let key_bundle = PublicKeyBundle::generate(engine, store)?;
     /// let public_keys = key_bundle.public_keys(engine, store)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn public_keys<E, S>(&self, eng: &mut E, store: &S) -> Result<PublicKeys<E::CS>>
+    pub fn public_keys<CE, KS>(&self, eng: &CE, store: &KS) -> Result<PublicKeys<CE::CS>>
     where
-        E: Engine,
-        S: KeyStore,
+        CE: Engine,
+        KS: KeyStore,
     {
         Ok(PublicKeys {
             ident_pk: store
-                .get_key::<_, IdentityKey<E::CS>>(eng, self.device_id)
+                .get_key::<_, IdentityKey<CE::CS>>(eng, self.device_id)
                 .context("unable to load `IdentityKey`")?
                 .context("unable to find `IdentityKey`")?
                 .public()?,
             enc_pk: store
-                .get_key::<_, EncryptionKey<E::CS>>(eng, self.enc_id)
+                .get_key::<_, EncryptionKey<CE::CS>>(eng, self.enc_id)
                 .context("unable to load `EncryptionKey`")?
                 .context("unable to find `EncryptionKey`")?
                 .public()?,
             sign_pk: store
-                .get_key::<_, SigningKey<E::CS>>(eng, self.sign_id)
+                .get_key::<_, SigningKey<CE::CS>>(eng, self.sign_id)
                 .context("unable to load `SigningKey`")?
                 .context("unable to find `SigningKey`")?
                 .public()?,

@@ -1,23 +1,30 @@
 //! AFC support.
+
+#![cfg(feature = "afc")]
+#![cfg_attr(docsrs, doc(cfg(feature = "afc")))]
+
 use core::fmt;
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     sync::{Arc, Mutex},
 };
 
 use anyhow::Context;
-use aranya_daemon_api::{AfcChannelId, AfcShmInfo, DaemonApiClient, CS};
+use aranya_daemon_api::{AfcLocalChannelId, AfcShmInfo, DaemonApiClient, CS};
 use aranya_fast_channels::{
     self as afc,
     shm::{Flag, Mode, ReadState},
-    Client as AfcClient,
+    AfcState, Client as AfcClient,
 };
+use aranya_id::custom_id;
+use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
-use tarpc::context;
 use tracing::debug;
 
 use crate::{
+    client::create_ctx,
     error::{aranya_error, IpcError},
+    util::{ApiConv as _, ApiId},
     DeviceId, LabelId, Result, TeamId,
 };
 
@@ -54,6 +61,12 @@ impl From<Box<[u8]>> for CtrlMsg {
     }
 }
 
+custom_id! {
+    /// A globally unique channel ID.
+    pub struct ChannelId;
+}
+impl ApiId<aranya_daemon_api::AfcChannelId> for ChannelId {}
+
 /// AFC seal error.
 #[derive(Debug, thiserror::Error)]
 pub struct AfcSealError(
@@ -61,9 +74,9 @@ pub struct AfcSealError(
     aranya_fast_channels::Error,
 );
 
-impl fmt::Display for AfcSealError {
+impl Display for AfcSealError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        std::fmt::Display::fmt(&self.0, f)
+        Display::fmt(&self.0, f)
     }
 }
 
@@ -74,9 +87,9 @@ pub struct AfcOpenError(
     aranya_fast_channels::Error,
 );
 
-impl fmt::Display for AfcOpenError {
+impl Display for AfcOpenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        std::fmt::Display::fmt(&self.0, f)
+        Display::fmt(&self.0, f)
     }
 }
 
@@ -108,8 +121,7 @@ pub enum Error {
 /// Aranya Fast Channels handler for managing channels which allow encrypting/decrypting application data buffers.
 pub struct Channels {
     daemon: DaemonApiClient,
-    // TODO: don't use mutex for shm reader aranya-core#399
-    keys: Arc<Mutex<ChannelKeys>>,
+    keys: Arc<ChannelKeys>,
 }
 
 // TODO: derive Debug on [`keys`] when [`AfcClient`] implements it.
@@ -126,7 +138,7 @@ impl Channels {
     /// plaintext data.
     pub const OVERHEAD: usize = AfcClient::<ReadState<CS>>::OVERHEAD;
 
-    pub(crate) fn new(daemon: DaemonApiClient, keys: Arc<Mutex<ChannelKeys>>) -> Self {
+    pub(crate) fn new(daemon: DaemonApiClient, keys: Arc<ChannelKeys>) -> Self {
         Self { daemon, keys }
     }
 
@@ -134,7 +146,7 @@ impl Channels {
     ///
     /// The creator of the channel will have a unidirectional channel [`SendChannel`] that can only `seal()` data.
     ///
-    /// Once the peer processes the [`CtrlMsg`] message with `recv_ctrl()`,
+    /// Once the peer processes the [`CtrlMsg`] message with `accept_channel()`,
     /// it will have a corresponding unidirectional channel [`ReceiveChannel`] object that can only `open()` data.
     ///
     /// To send data from the creator of the channel to the peer:
@@ -145,64 +157,94 @@ impl Channels {
     /// Returns:
     /// - A unidirectional channel [`SendChannel`] object that can only `seal()` data.
     /// - A [`CtrlMsg`] message to send to the peer.
-    pub async fn create_uni_send_channel(
+    pub async fn create_channel(
         &self,
         team_id: TeamId,
         peer_id: DeviceId,
         label_id: LabelId,
     ) -> Result<(SendChannel, CtrlMsg)> {
-        let (ctrl, channel_id) = self
+        let info = self
             .daemon
-            .create_afc_uni_send_channel(
-                context::current(),
-                team_id.__id,
-                peer_id.__id,
-                label_id.__id,
+            .create_afc_channel(
+                create_ctx(),
+                team_id.into_api(),
+                peer_id.into_api(),
+                label_id.into_api(),
             )
             .await
             .map_err(IpcError::new)?
             .map_err(aranya_error)?;
+        let seal_ctx = self
+            .keys
+            .0
+            .setup_seal_ctx(info.local_channel_id)
+            .map_err(AfcSealError)
+            .map_err(Error::Seal)?;
         let chan = SendChannel {
             daemon: self.daemon.clone(),
             keys: self.keys.clone(),
-            channel_id,
+            channel_id: ChannelId::from_api(info.channel_id),
+            local_channel_id: info.local_channel_id,
             label_id,
+            peer_id,
+            seal_ctx: Box::new(seal_ctx),
         };
-        Ok((chan, CtrlMsg(ctrl)))
+        Ok((chan, CtrlMsg(info.ctrl)))
     }
 
     /// Receive a [`CtrlMsg`] message from a peer to create a corresponding receive channel.
-    pub async fn recv_ctrl(&self, team_id: TeamId, ctrl: CtrlMsg) -> Result<ReceiveChannel> {
-        let (label_id, channel_id) = self
+    pub async fn accept_channel(&self, team_id: TeamId, ctrl: CtrlMsg) -> Result<ReceiveChannel> {
+        let info = self
             .daemon
-            .receive_afc_ctrl(context::current(), team_id.__id, ctrl.0)
+            .accept_afc_channel(create_ctx(), team_id.into_api(), ctrl.0)
             .await
             .map_err(IpcError::new)?
             .map_err(aranya_error)?;
+        let open_ctx = self
+            .keys
+            .0
+            .setup_open_ctx(info.local_channel_id)
+            .map_err(AfcSealError)
+            .map_err(Error::Seal)?;
         Ok(ReceiveChannel {
             daemon: self.daemon.clone(),
             keys: self.keys.clone(),
-            channel_id,
-            label_id: LabelId { __id: label_id },
+            channel_id: ChannelId::from_api(info.channel_id),
+            local_channel_id: info.local_channel_id,
+            label_id: LabelId::from_api(info.label_id),
+            peer_id: DeviceId::from_api(info.peer_id),
+            open_ctx: Arc::new(Mutex::new(open_ctx)),
         })
     }
 }
 
 /// A unidirectional channel that can only send.
-#[derive(Clone, Debug)]
+#[derive_where(Debug)]
 pub struct SendChannel {
     daemon: DaemonApiClient,
-    keys: Arc<Mutex<ChannelKeys>>,
-    channel_id: AfcChannelId,
+    keys: Arc<ChannelKeys>,
+    channel_id: ChannelId,
+    local_channel_id: AfcLocalChannelId,
     label_id: LabelId,
+    peer_id: DeviceId,
+    #[derive_where(skip(Debug))]
+    seal_ctx: Box<<ReadState<CS> as AfcState>::SealCtx>,
 }
 
 impl SendChannel {
-    // TODO: return channel's unique ID.
+    /// The channel's unique ID.
+    pub fn id(&self) -> ChannelId {
+        self.channel_id
+    }
 
     /// The channel's label ID.
     pub fn label_id(&self) -> LabelId {
         self.label_id
+    }
+
+    /// The device ID of the peer on the other side of the channel.
+    pub fn peer_id(&self) -> DeviceId {
+        self.peer_id
     }
 
     /// Encrypts and authenticates `plaintext` for a channel.
@@ -216,13 +258,11 @@ impl SendChannel {
     /// # Panics
     ///
     /// Will panic on poisoned internal mutexes.
-    pub fn seal(&self, dst: &mut [u8], plaintext: &[u8]) -> Result<(), Error> {
-        debug!(?self.channel_id, ?self.label_id, "seal");
+    pub fn seal(&mut self, dst: &mut [u8], plaintext: &[u8]) -> Result<(), Error> {
+        debug!(?self.local_channel_id, ?self.label_id, "seal");
         self.keys
-            .lock()
-            .expect("poisoned")
             .0
-            .seal(self.channel_id, dst, plaintext)
+            .seal(&mut self.seal_ctx, dst, plaintext)
             .map_err(AfcSealError)
             .map_err(Error::Seal)?;
         Ok(())
@@ -231,7 +271,7 @@ impl SendChannel {
     /// Delete the channel.
     pub async fn delete(&self) -> Result<(), crate::Error> {
         self.daemon
-            .delete_afc_channel(context::current(), self.channel_id)
+            .delete_afc_channel(create_ctx(), self.local_channel_id)
             .await
             .map_err(IpcError::new)?
             .map_err(aranya_error)?;
@@ -240,20 +280,33 @@ impl SendChannel {
 }
 
 /// A unidirectional channel that can only receive.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
+#[derive_where(Debug)]
 pub struct ReceiveChannel {
     daemon: DaemonApiClient,
-    keys: Arc<Mutex<ChannelKeys>>,
-    channel_id: AfcChannelId,
+    keys: Arc<ChannelKeys>,
+    channel_id: ChannelId,
+    local_channel_id: AfcLocalChannelId,
     label_id: LabelId,
+    peer_id: DeviceId,
+    #[derive_where(skip(Debug))]
+    open_ctx: Arc<Mutex<<ReadState<CS> as AfcState>::OpenCtx>>,
 }
 
 impl ReceiveChannel {
-    // TODO: return channel's unique ID.
+    /// The channel's unique ID.
+    pub fn id(&self) -> ChannelId {
+        self.channel_id
+    }
 
     /// The channel's label ID.
     pub fn label_id(&self) -> LabelId {
         self.label_id
+    }
+
+    /// The device ID of the peer on the other side of the channel.
+    pub fn peer_id(&self) -> DeviceId {
+        self.peer_id
     }
 
     /// Decrypts and authenticates `ciphertext` received from
@@ -272,23 +325,25 @@ impl ReceiveChannel {
     ///
     /// Will panic on poisoned internal mutexes.
     pub fn open(&self, dst: &mut [u8], ciphertext: &[u8]) -> Result<Seq, Error> {
-        debug!(?self.channel_id, ?self.label_id, "open");
+        debug!(?self.local_channel_id, ?self.label_id, "open");
         let (label_id, seq) = self
             .keys
-            .lock()
-            .expect("poisoned")
             .0
-            .open(self.channel_id, dst, ciphertext)
+            .open(
+                &mut *self.open_ctx.lock().expect("poisoned"),
+                dst,
+                ciphertext,
+            )
             .map_err(AfcOpenError)
             .map_err(Error::Open)?;
-        debug_assert_eq!(label_id.into_id(), self.label_id.__id.into_id());
+        debug_assert_eq!(label_id.as_base(), self.label_id.into_api().as_base());
         Ok(Seq(seq))
     }
 
     /// Delete the channel.
     pub async fn delete(&self) -> Result<(), crate::Error> {
         self.daemon
-            .delete_afc_channel(context::current(), self.channel_id)
+            .delete_afc_channel(create_ctx(), self.local_channel_id)
             .await
             .map_err(IpcError::new)?
             .map_err(aranya_error)?;

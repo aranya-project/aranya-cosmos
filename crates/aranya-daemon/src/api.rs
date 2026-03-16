@@ -4,12 +4,17 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 use core::{future, net::SocketAddr, ops::Deref, pin::pin};
+#[cfg(feature = "preview")]
+use std::collections::HashMap;
+#[cfg(feature = "preview")]
+use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{anyhow, Context as _};
 use aranya_crypto::{
-    default::WrappedKey, policy::GroupId, Csprng, DeviceId, EncryptionKey, EncryptionPublicKey,
-    Engine, KeyStore as _, KeyStoreExt as _, Rng,
+    default::WrappedKey,
+    policy::{GroupId, LabelId, RoleId},
+    Csprng, DeviceId, EncryptionKey, EncryptionPublicKey, KeyStore as _, KeyStoreExt as _, Rng,
 };
 pub(crate) use aranya_daemon_api::crypto::ApiKey;
 use aranya_daemon_api::{
@@ -19,6 +24,8 @@ use aranya_daemon_api::{
 };
 use aranya_keygen::PublicKeys;
 use aranya_runtime::GraphId;
+#[cfg(feature = "preview")]
+use aranya_runtime::{Address, Storage, StorageProvider};
 use aranya_util::{error::ReportExt as _, ready, task::scope, Addr};
 #[cfg(feature = "afc")]
 use buggy::bug;
@@ -29,21 +36,23 @@ use tarpc::{
     context,
     server::{incoming::Incoming, BaseChannel, Channel},
 };
-use tokio::{net::UnixListener, sync::mpsc};
+use tokio::{
+    net::UnixListener,
+    sync::{mpsc, Mutex},
+};
 use tracing::{debug, error, info, instrument, trace, warn};
 
+use crate::actions::SessionData;
 #[cfg(feature = "afc")]
 use crate::afc::Afc;
-#[cfg(feature = "aqc")]
-use crate::aqc::Aqc;
 use crate::{
     actions::Actions,
     daemon::{CE, CS, KS},
     keystore::LocalStore,
-    policy::{ChanOp, Effect, KeyBundle, Role},
-    sync::task::{quic as qs, SyncPeers},
+    policy::{ChanOp, Effect, Perm, PublicKeyBundle, RoleCreated},
+    sync::{quic as qs, SyncHandle, SyncPeer},
     util::SeedDir,
-    AranyaStore, Client, InvalidGraphs, EF,
+    AranyaStore, Client, EF,
 };
 
 mod quic_sync;
@@ -58,8 +67,6 @@ macro_rules! find_effect {
     }
 }
 
-pub(crate) type EffectReceiver = mpsc::Receiver<(GraphId, Vec<EF>)>;
-
 /// Daemon API Server.
 #[derive(Debug)]
 pub(crate) struct DaemonApiServer {
@@ -71,7 +78,7 @@ pub(crate) struct DaemonApiServer {
     listener: UnixListener,
 
     /// Channel for receiving effects from the syncer.
-    recv_effects: EffectReceiver,
+    recv_effects: mpsc::Receiver<(GraphId, Vec<EF>)>,
 
     /// Api Handler.
     api: Api,
@@ -83,11 +90,8 @@ pub(crate) struct DaemonApiServerArgs {
     pub(crate) uds_path: PathBuf,
     pub(crate) sk: ApiKey<CS>,
     pub(crate) pk: PublicKeys<CS>,
-    pub(crate) peers: SyncPeers,
-    pub(crate) recv_effects: EffectReceiver,
-    pub(crate) invalid: InvalidGraphs,
-    #[cfg(feature = "aqc")]
-    pub(crate) aqc: Option<Aqc<CE, KS>>,
+    pub(crate) syncer: SyncHandle,
+    pub(crate) recv_effects: mpsc::Receiver<(GraphId, Vec<EF>)>,
     #[cfg(feature = "afc")]
     pub(crate) afc: Afc<CE, CS, KS>,
     pub(crate) crypto: Crypto,
@@ -105,11 +109,8 @@ impl DaemonApiServer {
             uds_path,
             sk,
             pk,
-            peers,
+            syncer,
             recv_effects,
-            invalid,
-            #[cfg(feature = "aqc")]
-            aqc,
             #[cfg(feature = "afc")]
             afc,
             crypto,
@@ -121,26 +122,29 @@ impl DaemonApiServer {
         let uds_path = uds_path
             .canonicalize()
             .context("could not canonicalize uds_path")?;
-        #[cfg(feature = "aqc")]
-        let aqc = aqc.map(Arc::new);
         #[cfg(feature = "afc")]
         let afc = Arc::new(afc);
         let effect_handler = EffectHandler {
-            #[cfg(feature = "aqc")]
-            aqc: aqc.clone(),
+            #[cfg(feature = "afc")]
+            afc: afc.clone(),
+            #[cfg(feature = "afc")]
+            device_id: pk.ident_pk.id()?,
+            #[cfg(feature = "preview")]
+            client: client.clone(),
+            #[cfg(feature = "preview")]
+            syncer: syncer.clone(),
+            #[cfg(feature = "preview")]
+            prev_head_addresses: Arc::default(),
         };
         let api = Api(Arc::new(ApiInner {
             client,
             local_addr,
             pk: std::sync::Mutex::new(pk),
-            peers,
+            syncer,
             effect_handler,
-            invalid,
-            #[cfg(feature = "aqc")]
-            aqc,
             #[cfg(feature = "afc")]
             afc,
-            crypto: tokio::sync::Mutex::new(crypto),
+            crypto: Mutex::new(crypto),
             seed_id_dir,
             quic,
         }));
@@ -210,8 +214,17 @@ impl DaemonApiServer {
 /// Handles effects from an Aranya action.
 #[derive(Clone, Debug)]
 struct EffectHandler {
-    #[cfg(feature = "aqc")]
-    aqc: Option<Arc<Aqc<CE, KS>>>,
+    #[cfg(feature = "afc")]
+    afc: Arc<Afc<CE, CS, KS>>,
+    #[cfg(feature = "afc")]
+    device_id: DeviceId,
+    #[cfg(feature = "preview")]
+    client: Client,
+    #[cfg(feature = "preview")]
+    syncer: SyncHandle,
+    /// Stores the previous head address for each graph to detect changes
+    #[cfg(feature = "preview")]
+    prev_head_addresses: Arc<Mutex<HashMap<GraphId, Address>>>,
 }
 
 impl EffectHandler {
@@ -225,60 +238,109 @@ impl EffectHandler {
         for effect in effects {
             trace!(?effect, "handling effect");
             match effect {
-                TeamCreated(_team_created) => {}
-                TeamTerminated(_team_terminated) => {}
-                MemberAdded(_member_added) => {}
-                MemberRemoved(_member_removed) => {}
-                OwnerAssigned(_owner_assigned) => {}
-                AdminAssigned(_admin_assigned) => {}
-                OperatorAssigned(_operator_assigned) => {}
-                OwnerRevoked(_owner_revoked) => {}
-                AdminRevoked(_admin_revoked) => {}
-                OperatorRevoked(_operator_revoked) => {}
+                TeamCreated(_) => {}
+                TeamTerminated(_) => {}
+                DeviceAdded(_) => {}
+                DeviceRemoved(_) => {}
+                RoleAssigned(_) => {}
+                RoleRevoked(_) => {}
                 CameraTaskReceived(_) => {}
                 LabelCreated(_) => {}
                 LabelDeleted(_) => {}
-                LabelAssigned(_) => {}
-                LabelRevoked(_) => {}
-                AqcNetworkNameSet(e) => {
-                    #[cfg(feature = "aqc")]
-                    if let Some(aqc) = &self.aqc {
-                        aqc.add_peer(
-                            graph,
-                            api::NetIdentifier(e.net_identifier.clone()),
-                            e.device_id.into(),
-                        )
-                        .await;
-                        continue;
-                    }
-                    tracing::warn!(effect = ?e, "received AQC effect when not enabled");
-                }
-                AqcNetworkNameUnset(e) => {
-                    #[cfg(feature = "aqc")]
-                    if let Some(aqc) = &self.aqc {
-                        aqc.remove_peer(graph, e.device_id.into()).await;
-                        continue;
-                    }
-
-                    tracing::warn!(effect = ?e, "received AQC effect when not enabled")
-                }
-                QueriedLabel(_) => {}
-                AqcBidiChannelCreated(_) => {}
-                AqcBidiChannelReceived(_) => {}
-                AqcUniChannelCreated(_) => {}
-                AqcUniChannelReceived(_) => {}
+                AssignedLabelToDevice(_) => {}
+                LabelRevokedFromDevice(_) => {}
+                QueryLabelResult(_) => {}
                 AfcUniChannelCreated(_) => {}
                 AfcUniChannelReceived(_) => {}
                 QueryDevicesOnTeamResult(_) => {}
                 QueryDeviceRoleResult(_) => {}
                 QueryDeviceKeyBundleResult(_) => {}
-                QueriedLabelAssignment(_) => {}
-                QueryLabelExistsResult(_) => {}
-                QueryAqcNetIdentifierResult(_) => {}
-                QueryAqcNetworkNamesOutput(_) => {}
+                QueryLabelsAssignedToDeviceResult(_) => {}
+                PermAddedToRole(_) => {}
+                PermRemovedFromRole(_) => {}
+                RoleChanged(_) => {}
+                QueryLabelsResult(_) => {}
+                QueryTeamRolesResult(_) => {}
+                QueryAfcChannelIsValidResult(_) => {}
+                QueryRoleHasPermResult(_) => {}
+                QueryRolePermsResult(_) => {}
+                QueryRankResult(_) => {}
+                RankChanged(_) => {}
+                RoleCreated(_) => {}
+                RoleDeleted(_) => {}
+                CheckValidAfcChannels(_) => {
+                    #[cfg(feature = "afc")]
+                    self.afc
+                        .remove_invalid_channels(graph, self.device_id)
+                        .await?;
+                }
             }
         }
+
+        #[cfg(feature = "preview")]
+        {
+            // Check if the graph head address has changed
+            let Some(current_head) = self.get_graph_head_address(graph).await else {
+                warn!(?graph, "unable to get current graph head address");
+                return Ok(());
+            };
+
+            let mut prev_addresses = self.prev_head_addresses.lock().await;
+            let has_graph_changes = match prev_addresses.get(&graph) {
+                Some(prev_head) => prev_head != &current_head,
+                None => true, // First time seeing this graph
+            };
+
+            if has_graph_changes {
+                trace!(
+                    ?graph,
+                    ?current_head,
+                    "graph head address changed, triggering hello notification broadcast"
+                );
+                // Update stored head address
+                HashMap::insert(&mut prev_addresses, graph, current_head);
+                drop(prev_addresses); // Release the lock before async call
+
+                self.broadcast_hello_notifications(graph, current_head)
+                    .await;
+            } else {
+                trace!(
+                    ?graph,
+                    "graph head address unchanged, no hello broadcast needed"
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    /// Gets the current graph head address using the proper Location->Segment->Command->Address flow.
+    #[cfg(feature = "preview")]
+    async fn get_graph_head_address(&self, graph_id: GraphId) -> Option<Address> {
+        let client = &self.client;
+
+        let mut aranya = client.lock_aranya().await;
+        let storage = aranya.provider().get_storage(graph_id).ok()?;
+
+        storage.get_head_address().ok()
+    }
+
+    /// Broadcasts hello notifications to subscribers when the graph changes.
+    #[cfg(feature = "preview")]
+    #[instrument(skip(self))]
+    async fn broadcast_hello_notifications(&self, graph_id: GraphId, head: Address) {
+        // TODO: Don't fire off a spawn here.
+        let syncer = self.syncer.clone();
+        drop(tokio::spawn(async move {
+            if let Err(e) = syncer.broadcast_hello(graph_id, head).await {
+                warn!(
+                    error = %e,
+                    ?graph_id,
+                    ?head,
+                    "peers.broadcast_hello failed"
+                );
+            }
+        }));
     }
 }
 
@@ -293,18 +355,15 @@ struct ApiInner {
     local_addr: SocketAddr,
     /// Public keys of current device.
     pk: std::sync::Mutex<PublicKeys<CS>>,
-    /// Aranya sync peers,
-    peers: SyncPeers,
+    /// Handle to talk with the syncer.
+    syncer: SyncHandle,
     /// Handles graph effects from the syncer.
+    #[derive_where(skip(Debug))]
     effect_handler: EffectHandler,
-    /// Keeps track of which graphs are invalid due to a finalization error.
-    invalid: InvalidGraphs,
-    #[cfg(feature = "aqc")]
-    aqc: Option<Arc<Aqc<CE, KS>>>,
     #[cfg(feature = "afc")]
     afc: Arc<Afc<CE, CS, KS>>,
     #[derive_where(skip(Debug))]
-    crypto: tokio::sync::Mutex<Crypto>,
+    crypto: Mutex<Crypto>,
     seed_id_dir: SeedDir,
     quic: Option<quic_sync::Data>,
 }
@@ -316,9 +375,9 @@ pub(crate) struct Crypto {
 }
 
 impl ApiInner {
-    fn get_pk(&self) -> api::Result<KeyBundle> {
+    fn get_pk(&self) -> api::Result<PublicKeyBundle> {
         let pk = self.pk.lock().expect("poisoned");
-        Ok(KeyBundle::try_from(&*pk).context("bad key bundle")?)
+        Ok(PublicKeyBundle::try_from(&*pk).context("bad key bundle")?)
     }
 
     fn device_id(&self) -> api::Result<DeviceId> {
@@ -343,28 +402,36 @@ impl Deref for Api {
 impl Api {
     /// Checks wither a team's graph is valid.
     /// If the graph is not valid, return an error to prevent operations on the invalid graph.
-    async fn check_team_valid(&self, team: api::TeamId) -> anyhow::Result<()> {
-        if self.invalid.contains(team.into_id().into()) {
+    async fn check_team_valid(&self, team: api::TeamId) -> anyhow::Result<GraphId> {
+        if self
+            .client
+            .invalid_graphs()
+            .contains(GraphId::transmute(team))
+        {
             // TODO: return custom daemon error type
             anyhow::bail!("team {team} invalid due to graph finalization error")
         }
-        Ok(())
+        Ok(GraphId::transmute(team))
     }
 }
 
 impl DaemonApi for Api {
+    //
+    // Misc
+    //
+
     #[instrument(skip(self), err)]
     async fn version(self, context: context::Context) -> api::Result<api::Version> {
         api::Version::parse(env!("CARGO_PKG_VERSION")).map_err(Into::into)
     }
 
     #[instrument(skip(self), err)]
-    async fn aranya_local_addr(self, context: context::Context) -> api::Result<SocketAddr> {
-        Ok(self.local_addr)
+    async fn aranya_local_addr(self, context: context::Context) -> api::Result<Addr> {
+        Ok(self.local_addr.into())
     }
 
     #[instrument(skip(self), err)]
-    async fn get_key_bundle(self, _: context::Context) -> api::Result<api::KeyBundle> {
+    async fn get_public_key_bundle(self, _: context::Context) -> api::Result<api::PublicKeyBundle> {
         Ok(self
             .get_pk()
             .context("unable to get device public keys")?
@@ -373,7 +440,7 @@ impl DaemonApi for Api {
 
     #[instrument(skip(self), err)]
     async fn get_device_id(self, _: context::Context) -> api::Result<api::DeviceId> {
-        self.device_id().map(|id| id.into_id().into())
+        self.device_id().map(api::DeviceId::transmute)
     }
 
     #[cfg(feature = "afc")]
@@ -381,6 +448,10 @@ impl DaemonApi for Api {
     async fn afc_shm_info(self, context: context::Context) -> api::Result<api::AfcShmInfo> {
         Ok(self.afc.get_shm_info().await)
     }
+
+    //
+    // Syncing
+    //
 
     #[instrument(skip(self), err)]
     async fn add_sync_peer(
@@ -390,11 +461,9 @@ impl DaemonApi for Api {
         team: api::TeamId,
         cfg: api::SyncPeerConfig,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
-
-        self.peers
-            .add_peer(peer, team.into_id().into(), cfg)
-            .await?;
+        let graph = self.check_team_valid(team).await?;
+        let peer = SyncPeer::new(peer, graph);
+        self.syncer.add_peer(peer, cfg).await?;
         Ok(())
     }
 
@@ -406,11 +475,42 @@ impl DaemonApi for Api {
         team: api::TeamId,
         cfg: Option<api::SyncPeerConfig>,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
+        let peer = SyncPeer::new(peer, graph);
+        self.syncer.sync_now(peer, cfg).await?;
+        Ok(())
+    }
 
-        self.peers
-            .sync_now(peer, team.into_id().into(), cfg)
+    #[cfg(feature = "preview")]
+    #[instrument(skip(self), err)]
+    async fn sync_hello_subscribe(
+        self,
+        _: context::Context,
+        peer: Addr,
+        team: api::TeamId,
+        graph_change_debounce: Duration,
+        duration: Duration,
+        schedule_delay: Duration,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+        let peer = SyncPeer::new(peer, graph);
+        self.syncer
+            .sync_hello_subscribe(peer, graph_change_debounce, duration, schedule_delay)
             .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "preview")]
+    #[instrument(skip(self), err)]
+    async fn sync_hello_unsubscribe(
+        self,
+        _: context::Context,
+        peer: Addr,
+        team: api::TeamId,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+        let peer = SyncPeer::new(peer, graph);
+        self.syncer.sync_hello_unsubscribe(peer).await?;
         Ok(())
     }
 
@@ -421,14 +521,18 @@ impl DaemonApi for Api {
         peer: Addr,
         team: api::TeamId,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
-
-        self.peers
-            .remove_peer(peer, team.into_id().into())
+        let graph = self.check_team_valid(team).await?;
+        let peer = SyncPeer::new(peer, graph);
+        self.syncer
+            .remove_peer(peer)
             .await
             .context("unable to remove sync peer")?;
         Ok(())
     }
+
+    //
+    // Local team management
+    //
 
     #[instrument(skip(self))]
     async fn add_team(mut self, _: context::Context, cfg: api::AddTeamConfig) -> api::Result<()> {
@@ -447,13 +551,12 @@ impl DaemonApi for Api {
             self.remove_team_quic_sync(team, data)?;
         }
 
-        self.seed_id_dir.remove(&team).await?;
+        self.seed_id_dir.remove(team).await?;
 
         self.client
-            .aranya
-            .lock()
+            .lock_aranya()
             .await
-            .remove_graph(team.into_id().into())
+            .remove_graph(GraphId::transmute(team))
             .context("unable to remove graph from storage")?;
 
         Ok(())
@@ -476,7 +579,7 @@ impl DaemonApi for Api {
             .await
             .context("unable to create team")?;
         debug!(?graph_id);
-        let team_id: api::TeamId = graph_id.into_id().into();
+        let team_id = api::TeamId::transmute(graph_id);
 
         match cfg.quic_sync {
             Some(qs_cfg) => {
@@ -485,7 +588,7 @@ impl DaemonApi for Api {
             None => {
                 warn!("Missing QUIC sync config");
 
-                let seed = qs::PskSeed::new(&mut Rng, team_id);
+                let seed = qs::PskSeed::new(Rng, team_id);
                 self.add_seed(team_id, seed).await?;
             }
         }
@@ -495,10 +598,14 @@ impl DaemonApi for Api {
 
     #[instrument(skip(self), err)]
     async fn close_team(self, _: context::Context, team: api::TeamId) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let _graph = self.check_team_valid(team).await?;
 
         todo!();
     }
+
+    //
+    // Device onboarding
+    //
 
     #[instrument(skip(self), err)]
     async fn encrypt_psk_seed_for_peer(
@@ -512,21 +619,21 @@ impl DaemonApi for Api {
         let (seed, enc_sk) = {
             let crypto = &mut *self.crypto.lock().await;
             let seed = {
-                let seed_id = self.seed_id_dir.get(&team).await?;
-                qs::PskSeed::load(&mut crypto.engine, &crypto.local_store, &seed_id)?
+                let seed_id = self.seed_id_dir.get(team).await?;
+                qs::PskSeed::load(&crypto.engine, &crypto.local_store, seed_id)?
                     .context("no seed in dir")?
             };
             let enc_sk: EncryptionKey<CS> = crypto
                 .aranya_store
-                .get_key(&mut crypto.engine, enc_pk.id()?)
+                .get_key(&crypto.engine, enc_pk.id()?)
                 .context("keystore error")?
                 .context("missing enc_sk for encrypt seed")?;
             (seed, enc_sk)
         };
 
-        let group = GroupId::from(team.into_id());
+        let group = GroupId::transmute(team);
         let (encap_key, encrypted_seed) = enc_sk
-            .seal_psk_seed(&mut Rng, &seed.0, &peer_enc_pk, &group)
+            .seal_psk_seed(Rng, &seed.0, &peer_enc_pk, &group)
             .context("could not seal psk seed")?;
 
         Ok(WrappedSeed {
@@ -541,15 +648,19 @@ impl DaemonApi for Api {
         self,
         _: context::Context,
         team: api::TeamId,
-        keys: api::KeyBundle,
+        keys: api::PublicKeyBundle,
+        initial_role: Option<api::RoleId>,
+        rank: api::Rank,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
-        self.client
-            .actions(&team.into_id().into())
-            .add_member(keys.into())
+        let effects = self
+            .client
+            .actions(graph)
+            .add_device(keys.into(), initial_role.map(RoleId::transmute), rank)
             .await
             .context("unable to add device to team")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
         Ok(())
     }
 
@@ -560,14 +671,182 @@ impl DaemonApi for Api {
         team: api::TeamId,
         device: api::DeviceId,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
-        self.client
-            .actions(&team.into_id().into())
-            .remove_member(device.into_id().into())
+        let effects = self
+            .client
+            .actions(graph)
+            .remove_device(DeviceId::transmute(device))
             .await
             .context("unable to remove device from team")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn devices_on_team(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+    ) -> api::Result<Box<[api::DeviceId]>> {
+        let graph = self.check_team_valid(team).await?;
+
+        let devices = self
+            .client
+            .actions(graph)
+            .query_devices_on_team()
+            .await
+            .context("unable to query devices on team")?
+            .into_iter()
+            .filter_map(|e| {
+                if let Effect::QueryDevicesOnTeamResult(e) = e {
+                    Some(api::DeviceId::from_base(e.device_id))
+                } else {
+                    warn!(name = e.name(), "unexpected effect");
+                    None
+                }
+            })
+            .collect();
+
+        Ok(devices)
+    }
+
+    #[instrument(skip(self), err)]
+    async fn device_public_key_bundle(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        device: api::DeviceId,
+    ) -> api::Result<api::PublicKeyBundle> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .query_device_public_key_bundle(DeviceId::transmute(device))
+            .await
+            .context("unable to query device public key bundle")?;
+        if let Some(Effect::QueryDeviceKeyBundleResult(e)) =
+            find_effect!(effects, Effect::QueryDeviceKeyBundleResult(_e))
+        {
+            Ok(api::PublicKeyBundle::from(e.device_keys))
+        } else {
+            Err(anyhow!("unable to query device public key bundle").into())
+        }
+    }
+
+    #[instrument(skip(self), err)]
+    async fn labels_assigned_to_device(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        device: api::DeviceId,
+    ) -> api::Result<Box<[api::Label]>> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .query_labels_assigned_to_device(DeviceId::transmute(device))
+            .await
+            .context("unable to query device label assignments")?;
+        let mut labels = Vec::new();
+        for e in effects {
+            if let Effect::QueryLabelsAssignedToDeviceResult(e) = e {
+                debug!("found label: {}", e.label_id);
+                labels.push(api::Label {
+                    id: api::LabelId::from_base(e.label_id),
+                    name: e.label_name,
+                    author_id: api::DeviceId::from_base(e.label_author_id),
+                });
+            }
+        }
+        return Ok(labels.into_boxed_slice());
+    }
+
+    #[instrument(skip(self), err)]
+    async fn device_role(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        device: api::DeviceId,
+    ) -> api::Result<Option<api::Role>> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .query_device_role(DeviceId::transmute(device))
+            .await
+            .context("unable to query device role")?;
+        if let Some(Effect::QueryDeviceRoleResult(e)) =
+            find_effect!(&effects, Effect::QueryDeviceRoleResult(_))
+        {
+            Ok(Some(api::Role {
+                id: api::RoleId::from_base(e.role_id),
+                name: e.name.clone(),
+                author_id: api::DeviceId::from_base(e.author_id),
+                default: e.default,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[instrument(skip(self), err)]
+    async fn create_role(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        role_name: Text,
+        rank: api::Rank,
+    ) -> api::Result<api::Role> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .create_role(role_name, rank)
+            .await
+            .context("unable to create role")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        if let Some(Effect::RoleCreated(e)) = find_effect!(&effects, Effect::RoleCreated(_)) {
+            Ok(api::Role {
+                id: api::RoleId::from_base(e.role_id),
+                name: e.name.clone(),
+                author_id: api::DeviceId::from_base(e.author_id),
+                default: e.default,
+            })
+        } else {
+            Err(anyhow!("wrong effect when creating role").into())
+        }
+    }
+
+    #[instrument(skip(self), err)]
+    async fn delete_role(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        role_id: api::RoleId,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .delete_role(RoleId::transmute(role_id))
+            .await
+            .context("unable to delete role")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        if let Some(Effect::RoleDeleted(e)) = find_effect!(&effects, Effect::RoleDeleted(_)) {
+            info!("Deleted role {role_id} ({})", e.name());
+            Ok(())
+        } else {
+            Err(anyhow!("wrong effect when creating role").into())
+        }
     }
 
     #[instrument(skip(self), err)]
@@ -576,16 +855,23 @@ impl DaemonApi for Api {
         _: context::Context,
         team: api::TeamId,
         device: api::DeviceId,
-        role: api::Role,
+        role: api::RoleId,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
-        self.client
-            .actions(&team.into_id().into())
-            .assign_role(device.into_id().into(), role.into())
+        let effects = self
+            .client
+            .actions(graph)
+            .assign_role(DeviceId::transmute(device), RoleId::transmute(role))
             .await
             .context("unable to assign role")?;
-        Ok(())
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        if let Some(Effect::RoleAssigned(_e)) = find_effect!(&effects, Effect::RoleAssigned(_e)) {
+            Ok(())
+        } else {
+            Err(anyhow!("unable to assign role").into())
+        }
     }
 
     #[instrument(skip(self), err)]
@@ -594,230 +880,75 @@ impl DaemonApi for Api {
         _: context::Context,
         team: api::TeamId,
         device: api::DeviceId,
-        role: api::Role,
+        role: api::RoleId,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
-
-        self.client
-            .actions(&team.into_id().into())
-            .revoke_role(device.into_id().into(), role.into())
-            .await
-            .context("unable to revoke device role")?;
-        Ok(())
-    }
-
-    #[cfg(feature = "aqc")]
-    #[instrument(skip(self), err)]
-    async fn assign_aqc_net_identifier(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        device: api::DeviceId,
-        name: api::NetIdentifier,
-    ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
         let effects = self
             .client
-            .actions(&team.into_id().into())
-            .set_aqc_network_name(device.into_id().into(), name.0)
+            .actions(graph)
+            .revoke_role(DeviceId::transmute(device), RoleId::transmute(role))
             .await
-            .context("unable to assign aqc network identifier")?;
-        self.effect_handler
-            .handle_effects(GraphId::from(team.into_id()), &effects)
-            .await?;
-        Ok(())
-    }
-
-    #[cfg(feature = "aqc")]
-    #[instrument(skip(self), err)]
-    async fn remove_aqc_net_identifier(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        device: api::DeviceId,
-        name: api::NetIdentifier,
-    ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
-
-        self.client
-            .actions(&team.into_id().into())
-            .unset_aqc_network_name(device.into_id().into())
-            .await
-            .context("unable to remove aqc net identifier")?;
-        Ok(())
-    }
-
-    #[cfg(feature = "aqc")]
-    #[instrument(skip(self), err)]
-    async fn create_aqc_bidi_channel(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        peer: api::NetIdentifier,
-        label: api::LabelId,
-    ) -> api::Result<(api::AqcCtrl, api::AqcBidiPsks)> {
-        self.check_team_valid(team).await?;
-        let aqc = self.aqc.as_ref().context("AQC is not enabled")?;
-
-        info!("creating aqc bidi channel");
-
-        let graph = GraphId::from(team.into_id());
-
-        let peer_id = aqc
-            .find_device_id(graph, &peer)
-            .await
-            .context("did not find peer")?;
-
-        let (ctrl, effects) = self
-            .client
-            .actions(&graph)
-            .create_aqc_bidi_channel_off_graph(peer_id, label.into_id().into())
-            .await?;
-        let id = self.device_id()?;
-
-        let Some(Effect::AqcBidiChannelCreated(e)) =
-            find_effect!(&effects, Effect::AqcBidiChannelCreated(e) if e.author_id == id.into())
-        else {
-            return Err(anyhow!("unable to find `AqcBidiChannelCreated` effect").into());
-        };
-
+            .context("unable to revoke device role")?;
         self.effect_handler.handle_effects(graph, &effects).await?;
 
-        let psks = aqc.bidi_channel_created(e).await?;
-        info!(num = psks.len(), "bidi channel created");
-
-        Ok((ctrl, psks))
-    }
-
-    #[cfg(feature = "aqc")]
-    #[instrument(skip(self), err)]
-    async fn create_aqc_uni_channel(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        peer: api::NetIdentifier,
-        label: api::LabelId,
-    ) -> api::Result<(api::AqcCtrl, api::AqcUniPsks)> {
-        self.check_team_valid(team).await?;
-        let aqc = self.aqc.as_ref().context("AQC is not enabled")?;
-
-        info!("creating aqc uni channel");
-
-        let graph = GraphId::from(team.into_id());
-
-        let peer_id = aqc
-            .find_device_id(graph, &peer)
-            .await
-            .context("did not find peer")?;
-
-        let id = self.device_id()?;
-        let (ctrl, effects) = self
-            .client
-            .actions(&graph)
-            .create_aqc_uni_channel_off_graph(id, peer_id, label.into_id().into())
-            .await?;
-
-        let Some(Effect::AqcUniChannelCreated(e)) =
-            find_effect!(&effects, Effect::AqcUniChannelCreated(e) if e.author_id == id.into())
-        else {
-            return Err(anyhow!("unable to find AqcUniChannelCreated effect").into());
-        };
-
-        self.effect_handler.handle_effects(graph, &effects).await?;
-
-        let psks = aqc.uni_channel_created(e).await?;
-        info!(num = psks.len(), "aqc uni channel created");
-
-        Ok((ctrl, psks))
-    }
-
-    #[cfg(feature = "aqc")]
-    #[instrument(skip(self), err)]
-    async fn delete_aqc_bidi_channel(
-        self,
-        _: context::Context,
-        chan: api::AqcBidiChannelId,
-    ) -> api::Result<api::AqcCtrl> {
-        // TODO: remove AQC bidi channel from Aranya.
-        todo!();
-    }
-
-    #[cfg(feature = "aqc")]
-    #[instrument(skip(self), err)]
-    async fn delete_aqc_uni_channel(
-        self,
-        _: context::Context,
-        chan: api::AqcUniChannelId,
-    ) -> api::Result<api::AqcCtrl> {
-        // TODO: remove AQC uni channel from Aranya.
-        todo!();
-    }
-
-    #[cfg(feature = "aqc")]
-    #[instrument(skip(self), err)]
-    async fn receive_aqc_ctrl(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        ctrl: api::AqcCtrl,
-    ) -> api::Result<(api::LabelId, api::AqcPsks)> {
-        self.check_team_valid(team).await?;
-        let aqc = self.aqc.as_ref().context("AQC is not enabled")?;
-
-        let graph = GraphId::from(team.into_id());
-        let mut session = self.client.session_new(&graph).await?;
-        for cmd in ctrl {
-            let our_device_id = self.device_id()?;
-
-            let effects = self.client.session_receive(&mut session, &cmd).await?;
-            self.effect_handler.handle_effects(graph, &effects).await?;
-
-            let effect = effects.iter().find(|e| match e {
-                Effect::AqcBidiChannelReceived(e) => e.peer_id == our_device_id.into(),
-                Effect::AqcUniChannelReceived(e) => {
-                    e.sender_id != our_device_id.into() && e.receiver_id == our_device_id.into()
-                }
-                _ => false,
-            });
-            match effect {
-                Some(Effect::AqcBidiChannelReceived(e)) => {
-                    let psks = aqc.bidi_channel_received(e).await?;
-                    // NB: Each action should only produce one
-                    // ephemeral command.
-                    return Ok((e.label_id.into(), psks));
-                }
-                Some(Effect::AqcUniChannelReceived(e)) => {
-                    let psks = aqc.uni_channel_received(e).await?;
-                    // NB: Each action should only produce one
-                    // ephemeral command.
-                    return Ok((e.label_id.into(), psks));
-                }
-                Some(_) | None => {}
-            }
+        if let Some(Effect::RoleRevoked(_e)) = find_effect!(&effects, Effect::RoleRevoked(_e)) {
+            Ok(())
+        } else {
+            Err(anyhow!("unable to revoke device role").into())
         }
-        Err(anyhow!("unable to find AQC effect").into())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn change_role(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        device_id: api::DeviceId,
+        old_role_id: api::RoleId,
+        new_role_id: api::RoleId,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .change_role(
+                DeviceId::transmute(device_id),
+                RoleId::transmute(old_role_id),
+                RoleId::transmute(new_role_id),
+            )
+            .await
+            .context("unable to change device role")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        if let Some(Effect::RoleChanged(_e)) = find_effect!(&effects, Effect::RoleChanged(_e)) {
+            Ok(())
+        } else {
+            Err(anyhow!("unable to change device role").into())
+        }
     }
 
     #[cfg(feature = "afc")]
     #[instrument(skip(self), err)]
-    async fn create_afc_uni_send_channel(
+    async fn create_afc_channel(
         self,
         _: context::Context,
         team: api::TeamId,
         peer_id: api::DeviceId,
         label: api::LabelId,
-    ) -> api::Result<(api::AfcCtrl, api::AfcChannelId)> {
-        self.check_team_valid(team).await?;
+    ) -> api::Result<api::AfcSendChannelInfo> {
+        let graph = self.check_team_valid(team).await?;
 
         info!("creating afc uni channel");
 
-        let graph = GraphId::from(team.into_id());
-
-        let (ctrl, effects) = self
+        let SessionData { ctrl, effects } = self
             .client
-            .actions(&graph)
-            .create_afc_uni_channel_off_graph(peer_id.into_id().into(), label.into_id().into())
+            .actions(graph)
+            .create_afc_uni_channel_off_graph(
+                DeviceId::transmute(peer_id),
+                LabelId::transmute(label),
+            )
             .await?;
 
         let [Effect::AfcUniChannelCreated(e)] = effects.as_slice() else {
@@ -826,12 +957,16 @@ impl DaemonApi for Api {
 
         self.effect_handler.handle_effects(graph, &effects).await?;
 
-        let channel_id = self.afc.uni_channel_created(e).await?;
+        let (local_channel_id, channel_id) = self.afc.uni_channel_created(e).await?;
         info!("afc uni channel created");
 
         let ctrl = get_single_cmd(ctrl)?;
 
-        Ok((ctrl, channel_id))
+        Ok(api::AfcSendChannelInfo {
+            ctrl,
+            local_channel_id,
+            channel_id,
+        })
     }
 
     #[cfg(feature = "afc")]
@@ -839,7 +974,7 @@ impl DaemonApi for Api {
     async fn delete_afc_channel(
         self,
         _: context::Context,
-        chan: api::AfcChannelId,
+        chan: api::AfcLocalChannelId,
     ) -> api::Result<()> {
         self.afc.delete_channel(chan).await?;
         info!("afc channel deleted");
@@ -848,16 +983,15 @@ impl DaemonApi for Api {
 
     #[cfg(feature = "afc")]
     #[instrument(skip(self), err)]
-    async fn receive_afc_ctrl(
+    async fn accept_afc_channel(
         self,
         _: context::Context,
         team: api::TeamId,
         ctrl: api::AfcCtrl,
-    ) -> api::Result<(api::LabelId, api::AfcChannelId)> {
-        self.check_team_valid(team).await?;
+    ) -> api::Result<api::AfcReceiveChannelInfo> {
+        let graph = self.check_team_valid(team).await?;
 
-        let graph = GraphId::from(team.into_id());
-        let mut session = self.client.session_new(&graph).await?;
+        let mut session = self.client.session_new(graph).await?;
 
         let effects = self.client.session_receive(&mut session, &ctrl).await?;
 
@@ -867,9 +1001,14 @@ impl DaemonApi for Api {
 
         self.effect_handler.handle_effects(graph, &effects).await?;
 
-        let channel_id = self.afc.uni_channel_received(e).await?;
+        let (local_channel_id, channel_id) = self.afc.uni_channel_received(e).await?;
 
-        return Ok((e.label_id.into(), channel_id));
+        return Ok(api::AfcReceiveChannelInfo {
+            local_channel_id,
+            channel_id,
+            label_id: api::LabelId::from_base(e.label_id),
+            peer_id: api::DeviceId::from_base(e.sender_id),
+        });
     }
 
     async fn task_camera(
@@ -879,16 +1018,21 @@ impl DaemonApi for Api {
         task_name: Text,
         peer: api::DeviceId,
     ) -> api::Result<Box<[u8]>> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
-        let graph = GraphId::from(team.into_id());
-
-        let (ctrl, effects) = self
+        let SessionData {
+            #[cfg(feature = "afc")]
+            ctrl,
+            effects,
+        } = self
             .client
-            .actions(&graph)
-            .task_camera(task_name, peer.into_id().into())
+            .actions(graph)
+            .task_camera(task_name, DeviceId::transmute(peer))
             .await?;
+        #[cfg(feature = "afc")]
         let ctrl = get_single_cmd(ctrl)?;
+        #[cfg(not(feature = "afc"))]
+        let ctrl = Box::default();
         self.effect_handler.handle_effects(graph, &effects).await?;
 
         Ok(ctrl)
@@ -901,10 +1045,9 @@ impl DaemonApi for Api {
         task_name: Text,
         ctrl: Box<[u8]>,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
-        let graph = GraphId::from(team.into_id());
-        let mut session = self.client.session_new(&graph).await?;
+        let mut session = self.client.session_new(graph).await?;
 
         let effects = self.client.session_receive(&mut session, &ctrl).await?;
         self.effect_handler.handle_effects(graph, &effects).await?;
@@ -926,23 +1069,25 @@ impl DaemonApi for Api {
         _: context::Context,
         team: api::TeamId,
         label_name: Text,
+        rank: api::Rank,
     ) -> api::Result<api::LabelId> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
         let effects = self
             .client
-            .actions(&team.into_id().into())
-            .create_label(label_name)
+            .actions(graph)
+            .create_label(label_name, rank)
             .await
-            .context("unable to create AQC label")?;
+            .context("unable to create label")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
         if let Some(Effect::LabelCreated(e)) = find_effect!(&effects, Effect::LabelCreated(_e)) {
-            Ok(e.label_id.into())
+            Ok(api::LabelId::from_base(e.label_id))
         } else {
-            Err(anyhow!("unable to create AQC label").into())
+            Err(anyhow!("unable to create label").into())
         }
     }
 
-    /// Delete a label.
     #[instrument(skip(self), err)]
     async fn delete_label(
         self,
@@ -950,24 +1095,25 @@ impl DaemonApi for Api {
         team: api::TeamId,
         label_id: api::LabelId,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
         let effects = self
             .client
-            .actions(&team.into_id().into())
-            .delete_label(label_id.into_id().into())
+            .actions(graph)
+            .delete_label(LabelId::transmute(label_id))
             .await
-            .context("unable to delete AQC label")?;
+            .context("unable to delete label")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
         if let Some(Effect::LabelDeleted(_e)) = find_effect!(&effects, Effect::LabelDeleted(_e)) {
             Ok(())
         } else {
-            Err(anyhow!("unable to delete AQC label").into())
+            Err(anyhow!("unable to delete label").into())
         }
     }
 
-    /// Assign a label.
     #[instrument(skip(self), err)]
-    async fn assign_label(
+    async fn assign_label_to_device(
         self,
         _: context::Context,
         team: api::TeamId,
@@ -975,227 +1121,299 @@ impl DaemonApi for Api {
         label_id: api::LabelId,
         op: api::ChanOp,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
         let effects = self
             .client
-            .actions(&team.into_id().into())
-            .assign_label(
-                device.into_id().into(),
-                label_id.into_id().into(),
+            .actions(graph)
+            .assign_label_to_device(
+                DeviceId::transmute(device),
+                LabelId::transmute(label_id),
                 op.into(),
             )
             .await
-            .context("unable to assign AQC label")?;
-        if let Some(Effect::LabelAssigned(_e)) = find_effect!(&effects, Effect::LabelAssigned(_e)) {
+            .context("unable to assign label")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        if let Some(Effect::AssignedLabelToDevice(_e)) =
+            find_effect!(&effects, Effect::AssignedLabelToDevice(_e))
+        {
             Ok(())
         } else {
-            Err(anyhow!("unable to assign AQC label").into())
+            Err(anyhow!("unable to assign label").into())
         }
     }
 
-    /// Revoke a label.
     #[instrument(skip(self), err)]
-    async fn revoke_label(
+    async fn revoke_label_from_device(
         self,
         _: context::Context,
         team: api::TeamId,
         device: api::DeviceId,
         label_id: api::LabelId,
     ) -> api::Result<()> {
-        self.check_team_valid(team).await?;
+        let graph = self.check_team_valid(team).await?;
 
         let effects = self
             .client
-            .actions(&team.into_id().into())
-            .revoke_label(device.into_id().into(), label_id.into_id().into())
+            .actions(graph)
+            .revoke_label_from_device(DeviceId::transmute(device), LabelId::transmute(label_id))
             .await
-            .context("unable to revoke AQC label")?;
-        if let Some(Effect::LabelRevoked(_e)) = find_effect!(&effects, Effect::LabelRevoked(_e)) {
+            .context("unable to revoke label")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        if let Some(Effect::LabelRevokedFromDevice(_e)) =
+            find_effect!(&effects, Effect::LabelRevokedFromDevice(_e))
+        {
             Ok(())
         } else {
-            Err(anyhow!("unable to revoke AQC label").into())
+            Err(anyhow!("unable to revoke label").into())
         }
     }
 
-    /// Query devices on team.
     #[instrument(skip(self), err)]
-    async fn query_devices_on_team(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-    ) -> api::Result<Vec<api::DeviceId>> {
-        self.check_team_valid(team).await?;
-
-        let (_ctrl, effects) = self
-            .client
-            .actions(&team.into_id().into())
-            .query_devices_on_team_off_graph()
-            .await
-            .context("unable to query devices on team")?;
-        let mut devices: Vec<api::DeviceId> = Vec::new();
-        for e in effects {
-            if let Effect::QueryDevicesOnTeamResult(e) = e {
-                devices.push(e.device_id.into());
-            }
-        }
-        return Ok(devices);
-    }
-    /// Query device role.
-    #[instrument(skip(self), err)]
-    async fn query_device_role(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        device: api::DeviceId,
-    ) -> api::Result<api::Role> {
-        self.check_team_valid(team).await?;
-
-        let (_ctrl, effects) = self
-            .client
-            .actions(&team.into_id().into())
-            .query_device_role_off_graph(device.into_id().into())
-            .await
-            .context("unable to query device role")?;
-        if let Some(Effect::QueryDeviceRoleResult(e)) =
-            find_effect!(&effects, Effect::QueryDeviceRoleResult(_e))
-        {
-            Ok(api::Role::from(e.role))
-        } else {
-            Err(anyhow!("unable to query device role").into())
-        }
-    }
-    /// Query device keybundle.
-    #[instrument(skip(self), err)]
-    async fn query_device_keybundle(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        device: api::DeviceId,
-    ) -> api::Result<api::KeyBundle> {
-        self.check_team_valid(team).await?;
-
-        let (_ctrl, effects) = self
-            .client
-            .actions(&team.into_id().into())
-            .query_device_keybundle_off_graph(device.into_id().into())
-            .await
-            .context("unable to query device keybundle")?;
-        if let Some(Effect::QueryDeviceKeyBundleResult(e)) =
-            find_effect!(effects, Effect::QueryDeviceKeyBundleResult(_e))
-        {
-            Ok(api::KeyBundle::from(e.device_keys))
-        } else {
-            Err(anyhow!("unable to query device keybundle").into())
-        }
-    }
-
-    /// Query device label assignments.
-    #[instrument(skip(self), err)]
-    async fn query_device_label_assignments(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        device: api::DeviceId,
-    ) -> api::Result<Vec<api::Label>> {
-        self.check_team_valid(team).await?;
-
-        let (_ctrl, effects) = self
-            .client
-            .actions(&team.into_id().into())
-            .query_label_assignments_off_graph(device.into_id().into())
-            .await
-            .context("unable to query device label assignments")?;
-        let mut labels: Vec<api::Label> = Vec::new();
-        for e in effects {
-            if let Effect::QueriedLabelAssignment(e) = e {
-                debug!("found label: {}", e.label_id);
-                labels.push(api::Label {
-                    id: e.label_id.into(),
-                    name: e.label_name,
-                });
-            }
-        }
-        return Ok(labels);
-    }
-
-    /// Query AQC network ID.
-    #[cfg(feature = "aqc")]
-    #[instrument(skip(self), err)]
-    async fn query_aqc_net_identifier(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-        device: api::DeviceId,
-    ) -> api::Result<Option<api::NetIdentifier>> {
-        self.check_team_valid(team).await?;
-
-        if let Ok((_ctrl, effects)) = self
-            .client
-            .actions(&team.into_id().into())
-            .query_aqc_net_identifier_off_graph(device.into_id().into())
-            .await
-        {
-            if let Some(Effect::QueryAqcNetIdentifierResult(e)) =
-                find_effect!(effects, Effect::QueryAqcNetIdentifierResult(_e))
-            {
-                return Ok(Some(api::NetIdentifier(e.net_identifier)));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Query label exists.
-    #[instrument(skip(self), err)]
-    async fn query_label_exists(
+    async fn label(
         self,
         _: context::Context,
         team: api::TeamId,
         label_id: api::LabelId,
-    ) -> api::Result<bool> {
-        self.check_team_valid(team).await?;
+    ) -> api::Result<Option<api::Label>> {
+        let graph = self.check_team_valid(team).await?;
 
-        let (_ctrl, effects) = self
+        let effects = self
             .client
-            .actions(&team.into_id().into())
-            .query_label_exists_off_graph(label_id.into_id().into())
+            .actions(graph)
+            .query_label(LabelId::transmute(label_id))
             .await
             .context("unable to query label")?;
-        if let Some(Effect::QueryLabelExistsResult(_e)) =
-            find_effect!(&effects, Effect::QueryLabelExistsResult(_e))
+        if let Some(Effect::QueryLabelResult(e)) =
+            find_effect!(&effects, Effect::QueryLabelResult(_e))
         {
-            Ok(true)
+            Ok(Some(api::Label {
+                id: api::LabelId::from_base(e.label_id),
+                name: e.label_name.clone(),
+                author_id: api::DeviceId::from_base(e.label_author_id),
+            }))
         } else {
-            Err(anyhow!("unable to query whether label exists").into())
+            Ok(None)
         }
     }
 
-    /// Query list of labels.
     #[instrument(skip(self), err)]
-    async fn query_labels(
-        self,
-        _: context::Context,
-        team: api::TeamId,
-    ) -> api::Result<Vec<api::Label>> {
-        self.check_team_valid(team).await?;
+    async fn labels(self, _: context::Context, team: api::TeamId) -> api::Result<Vec<api::Label>> {
+        let graph = self.check_team_valid(team).await?;
 
-        let (_ctrl, effects) = self
+        let effects = self
             .client
-            .actions(&team.into_id().into())
-            .query_labels_off_graph()
+            .actions(graph)
+            .query_labels()
             .await
             .context("unable to query labels")?;
         let mut labels: Vec<api::Label> = Vec::new();
         for e in effects {
-            if let Effect::QueriedLabel(e) = e {
+            if let Effect::QueryLabelsResult(e) = e {
                 debug!("found label: {}", e.label_id);
                 labels.push(api::Label {
-                    id: e.label_id.into(),
-                    name: e.label_name,
+                    id: api::LabelId::from_base(e.label_id),
+                    name: e.label_name.clone(),
+                    author_id: api::DeviceId::from_base(e.label_author_id),
                 });
             }
         }
         Ok(labels)
+    }
+
+    #[instrument(skip(self), err)]
+    async fn setup_default_roles(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+    ) -> api::Result<Box<[api::Role]>> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .setup_default_roles()
+            .await
+            .context("unable to setup default roles")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        let roles = effects
+            .into_iter()
+            .filter_map(|e| {
+                if let Effect::RoleCreated(e @ RoleCreated { default: true, .. }) = e {
+                    Some(api::Role {
+                        id: api::RoleId::from_base(e.role_id),
+                        name: e.name,
+                        author_id: api::DeviceId::from_base(e.author_id),
+                        default: e.default,
+                    })
+                } else {
+                    warn!(name = e.name(), "unexpected effect");
+                    None
+                }
+            })
+            .collect();
+
+        Ok(roles)
+    }
+
+    #[instrument(skip(self), err)]
+    async fn team_roles(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+    ) -> api::Result<Box<[api::Role]>> {
+        let graph = self.check_team_valid(team).await?;
+
+        let roles = self
+            .client
+            .actions(graph)
+            .query_team_roles()
+            .await
+            .context("unable to query team roles")?
+            .into_iter()
+            .filter_map(|e| {
+                if let Effect::QueryTeamRolesResult(e) = e {
+                    Some(api::Role {
+                        id: api::RoleId::from_base(e.role_id),
+                        name: e.name,
+                        author_id: api::DeviceId::from_base(e.author_id),
+                        default: e.default,
+                    })
+                } else {
+                    warn!(name = e.name(), "unexpected effect");
+                    None
+                }
+            })
+            .collect();
+        Ok(roles)
+    }
+
+    //
+    // Role management
+    //
+
+    #[instrument(skip(self), err)]
+    async fn add_perm_to_role(
+        self,
+        context: context::Context,
+        team: api::TeamId,
+        role: api::RoleId,
+        perm: api::Perm,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .add_perm_to_role(RoleId::transmute(role), perm.into())
+            .await
+            .context("unable to add permission to role")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn remove_perm_from_role(
+        self,
+        context: context::Context,
+        team: api::TeamId,
+        role: api::RoleId,
+        perm: api::Perm,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .remove_perm_from_role(RoleId::transmute(role), perm.into())
+            .await
+            .context("unable to add permission to role")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn query_role_perms(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        role: api::RoleId,
+    ) -> api::Result<Vec<api::Perm>> {
+        let graph = self.check_team_valid(team).await?;
+
+        let perms = self
+            .client
+            .actions(graph)
+            .query_role_perms(RoleId::transmute(role))
+            .await
+            .context("unable to query role permissions")?
+            .into_iter()
+            .filter_map(|e| {
+                if let Effect::QueryRolePermsResult(e) = e {
+                    Some(e.perm.into())
+                } else {
+                    warn!(name = e.name(), "unexpected effect");
+                    None
+                }
+            })
+            .collect();
+
+        Ok(perms)
+    }
+
+    #[instrument(skip(self), err)]
+    async fn change_rank(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        object_id: api::ObjectId,
+        old_rank: api::Rank,
+        new_rank: api::Rank,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .change_rank(object_id, old_rank, new_rank)
+            .await
+            .context("unable to change rank")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        if find_effect!(&effects, Effect::RankChanged(_)).is_some() {
+            Ok(())
+        } else {
+            Err(anyhow!("unable to change rank").into())
+        }
+    }
+
+    #[instrument(skip(self), err)]
+    async fn query_rank(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        object_id: api::ObjectId,
+    ) -> api::Result<api::Rank> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .query_rank(object_id)
+            .await
+            .context("unable to query rank")?;
+
+        if let Some(Effect::QueryRankResult(e)) = find_effect!(&effects, Effect::QueryRankResult(_))
+        {
+            Ok(api::Rank::new(e.rank))
+        } else {
+            Err(anyhow!("rank not found for object").into())
+        }
     }
 }
 
@@ -1203,26 +1421,20 @@ impl Api {
     async fn add_seed(&mut self, team: api::TeamId, seed: qs::PskSeed) -> anyhow::Result<()> {
         let crypto = &mut *self.crypto.lock().await;
 
-        let id = seed.id().context("getting seed id")?;
-
-        let wrapped_key = crypto
-            .engine
-            .wrap(seed.clone().into_inner())
-            .context("wrapping seed")?;
-        crypto
+        let id = crypto
             .local_store
-            .try_insert(id.into_id(), wrapped_key)
+            .insert_key(&crypto.engine, seed.into_inner())
             .context("inserting seed")?;
 
         if let Err(e) = self
             .seed_id_dir
-            .append(&team, &id)
+            .append(team, id)
             .await
             .context("could not write seed id to file")
         {
             match crypto
                 .local_store
-                .remove::<WrappedKey<CS>>(id.into_id())
+                .remove::<WrappedKey<CS>>(id.as_base())
                 .context("could not remove seed from keystore")
             {
                 Ok(_) => return Err(e),
@@ -1234,9 +1446,9 @@ impl Api {
     }
 }
 
-impl From<api::KeyBundle> for KeyBundle {
-    fn from(value: api::KeyBundle) -> Self {
-        KeyBundle {
+impl From<api::PublicKeyBundle> for PublicKeyBundle {
+    fn from(value: api::PublicKeyBundle) -> Self {
+        PublicKeyBundle {
             ident_key: value.identity,
             sign_key: value.signing,
             enc_key: value.encryption,
@@ -1244,34 +1456,12 @@ impl From<api::KeyBundle> for KeyBundle {
     }
 }
 
-impl From<KeyBundle> for api::KeyBundle {
-    fn from(value: KeyBundle) -> Self {
-        api::KeyBundle {
+impl From<PublicKeyBundle> for api::PublicKeyBundle {
+    fn from(value: PublicKeyBundle) -> Self {
+        api::PublicKeyBundle {
             identity: value.ident_key,
             signing: value.sign_key,
             encryption: value.enc_key,
-        }
-    }
-}
-
-impl From<api::Role> for Role {
-    fn from(value: api::Role) -> Self {
-        match value {
-            api::Role::Owner => Role::Owner,
-            api::Role::Admin => Role::Admin,
-            api::Role::Operator => Role::Operator,
-            api::Role::Member => Role::Member,
-        }
-    }
-}
-
-impl From<Role> for api::Role {
-    fn from(value: Role) -> Self {
-        match value {
-            Role::Owner => api::Role::Owner,
-            Role::Admin => api::Role::Admin,
-            Role::Operator => api::Role::Operator,
-            Role::Member => api::Role::Member,
         }
     }
 }
@@ -1296,7 +1486,56 @@ impl From<ChanOp> for api::ChanOp {
     }
 }
 
+#[allow(clippy::disallowed_macros)] // `From` is infallible so we cannot use `bug!`
+impl From<api::Perm> for Perm {
+    fn from(value: api::Perm) -> Self {
+        match value {
+            api::Perm::AddDevice => Perm::AddDevice,
+            api::Perm::RemoveDevice => Perm::RemoveDevice,
+            api::Perm::TerminateTeam => Perm::TerminateTeam,
+            api::Perm::ChangeRank => Perm::ChangeRank,
+            api::Perm::CreateRole => Perm::CreateRole,
+            api::Perm::DeleteRole => Perm::DeleteRole,
+            api::Perm::AssignRole => Perm::AssignRole,
+            api::Perm::RevokeRole => Perm::RevokeRole,
+            api::Perm::ChangeRolePerms => Perm::ChangeRolePerms,
+            api::Perm::SetupDefaultRole => Perm::SetupDefaultRole,
+            api::Perm::CreateLabel => Perm::CreateLabel,
+            api::Perm::DeleteLabel => Perm::DeleteLabel,
+            api::Perm::AssignLabel => Perm::AssignLabel,
+            api::Perm::RevokeLabel => Perm::RevokeLabel,
+            api::Perm::CanUseAfc => Perm::CanUseAfc,
+            api::Perm::CreateAfcUniChannel => Perm::CreateAfcUniChannel,
+            _ => unreachable!("daemon Perm enum is out of sync with aranya_daemon_api::Perm"),
+        }
+    }
+}
+
+impl From<Perm> for api::Perm {
+    fn from(value: Perm) -> Self {
+        match value {
+            Perm::AddDevice => api::Perm::AddDevice,
+            Perm::RemoveDevice => api::Perm::RemoveDevice,
+            Perm::TerminateTeam => api::Perm::TerminateTeam,
+            Perm::ChangeRank => api::Perm::ChangeRank,
+            Perm::CreateRole => api::Perm::CreateRole,
+            Perm::DeleteRole => api::Perm::DeleteRole,
+            Perm::AssignRole => api::Perm::AssignRole,
+            Perm::RevokeRole => api::Perm::RevokeRole,
+            Perm::ChangeRolePerms => api::Perm::ChangeRolePerms,
+            Perm::SetupDefaultRole => api::Perm::SetupDefaultRole,
+            Perm::CreateLabel => api::Perm::CreateLabel,
+            Perm::DeleteLabel => api::Perm::DeleteLabel,
+            Perm::AssignLabel => api::Perm::AssignLabel,
+            Perm::RevokeLabel => api::Perm::RevokeLabel,
+            Perm::CanUseAfc => api::Perm::CanUseAfc,
+            Perm::CreateAfcUniChannel => api::Perm::CreateAfcUniChannel,
+        }
+    }
+}
+
 /// Extract a single session command.
+#[cfg(feature = "afc")]
 fn get_single_cmd(cmds: Vec<Box<[u8]>>) -> anyhow::Result<Box<[u8]>> {
     let mut cmds = cmds.into_iter();
     let msg = cmds.next().context("missing ephemeral command")?;

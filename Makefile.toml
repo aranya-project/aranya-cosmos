@@ -1,7 +1,6 @@
 [env]
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = 1
 RUSTDOCFLAGS = { value = "", condition = { env_not_set = ["RUSTDOCFLAGS"] } }
-NIGHTLY = { script = ["cat rust-nightly.txt"], condition = { env_not_set = ["NIGHTLY"] } }
 
 RUSTFLAGS = { value = "-Dwarnings", condition = { env_true = ["CARGO_MAKE_CI"] } }
 
@@ -39,42 +38,41 @@ dependencies = ["build"]
 category = "build"
 description = "Build Code with experimental features"
 command = "cargo"
-args = ["build", "--verbose", "--release", "--package=aranya-daemon", "--features=preview,afc,experimental,aqc", "${@}"]
+args = ["build", "--verbose", "--release", "--package=aranya-daemon", "--features=preview,experimental", "${@}"]
 
 [tasks.build-preview]
 category = "build"
 description = "Build Code with preview features"
 command = "cargo"
-args = ["build", "--verbose", "--release", "--package=aranya-daemon", "--features=preview,afc", "${@}"]
+args = ["build", "--verbose", "--release", "--package=aranya-daemon", "--features=preview", "${@}"]
 
 [tasks.tgz-daemon]
 category = "build"
 description = "Archive daemon"
+dependencies = ["build"]
 script = "tar -czf aranya-daemon.tar.gz -C target/release aranya-daemon"
+
+# Build aranya-certgen
+[tasks.build-certgen]
+category = "build"
+description = "Build aranya-certgen CLI tool"
+command = "cargo"
+args = ["build", "--verbose", "--release", "--package=aranya-certgen", "--features=cli", "${@}"]
+
+[tasks.tgz-certgen]
+category = "build"
+description = "Archive aranya-certgen"
+dependencies = ["build-certgen"]
+script = "tar -czf aranya-certgen.tar.gz -C target/release aranya-certgen"
 
 # Build the `aranya-client-capi` C API.
 [tasks.build-capi]
 category = "build"
 description = "Build C API"
 run_task = { name = [
-    "build-capi-header",
     "build-capi-docs",
     "build-capi-lib",
 ] }
-
-# Build the `aranya-client-capi` C API `aranya-client.h` header file.
-# NOTE: From 1.87 onward, cargo-expand doesn't include cfg's, so cbindgen won't
-# see them to include in the header. Until this is fixed, we cannot increase
-# our MSRV beyond 1.86. See https://github.com/rust-lang/rust/issues/139715.
-[tasks.build-capi-header]
-category = "build"
-description = "Build C API header"
-cwd = "crates/aranya-client-capi"
-# Fake nightly support to enable macro expansion, so we don't have to pin to nightly 1.86 (see above).
-env.RUSTC_BOOTSTRAP = "1"
-command = "cbindgen"
-args = ["--config=cbindgen.toml", "--output=output/aranya-client.h"]
-dependencies = ["install-cbindgen"]
 
 [tasks.build-capi-docs]
 category = "build"
@@ -104,14 +102,14 @@ category = "build"
 description = "Build C API shared library with experimental features"
 cwd = "crates/aranya-client-capi"
 command = "cargo"
-args = ["build", "--release", "--features=preview,afc,experimental,aqc"]
+args = ["build", "--release", "--features=preview,experimental"]
 
 [tasks.build-capi-lib-preview]
 category = "build"
 description = "Build C API shared library with preview features"
 cwd = "crates/aranya-client-capi"
 command = "cargo"
-args = ["build", "--release", "--features=preview,afc"]
+args = ["build", "--release", "--features=preview"]
 
 [tasks.tgz-capi]
 category = "build"
@@ -128,11 +126,6 @@ cp crates/aranya-client-capi/output/aranya-client.h "${capi}"/include/
 tar -cvzf aranya-client-lib.tar.gz -C "${capi}" .
 '''
 
-[tasks.install-cbindgen]
-private = true
-install_crate = { crate_name = "cbindgen", version = "0.29.0", binary = "cbindgen", test_arg = "-V" }
-
-
 # Test
 [tasks.test]
 category = "test"
@@ -141,6 +134,29 @@ workspace = true
 command = "cargo"
 args = ["--verbose", "test-all-features", "${@}"]
 dependencies = ["install-cargo-all-features"]
+
+[tasks.ctest-build]
+category = "build"
+description = "Build C API test suite"
+script = '''
+cmake -B build -S .
+cmake --build build
+'''
+
+[tasks.ctest]
+category = "test"
+description = "Run C API test suite"
+cwd = "build"
+command = "ctest"
+dependencies = ["ctest-build"]
+
+[tasks.ctest-verbose]
+category = "test"
+description = "Run C API test suite with verbose output"
+cwd = "build"
+command = "ctest"
+args = ["-V"]
+dependencies = ["ctest-build"]
 
 
 # Security
@@ -155,19 +171,22 @@ run_task = { name = [
 
 [tasks.cargo-audit]
 category = "security"
-install_crate = { crate_name = "cargo-audit", version = "0.21.2", binary = "cargo-audit", test_arg = "-V" }
+toolchain = "stable"
+install_crate = { crate_name = "cargo-audit", version = "0.22.0", binary = "cargo-audit", test_arg = "-V" }
 command = "cargo"
 args = ["audit"]
 
 [tasks.cargo-deny]
 category = "security"
-install_crate = { crate_name = "cargo-deny", version = "0.18.2", binary = "cargo-deny", test_arg = "-V" }
+toolchain = "stable"
+install_crate = { crate_name = "cargo-deny", version = "0.18.9", binary = "cargo-deny", test_arg = "-V" }
 command = "cargo"
 args = ["deny", "check"]
 
 [tasks.cargo-vet]
 category = "security"
-install_crate = { crate_name = "cargo-vet", version = "0.10.0", binary = "cargo-vet", test_arg = "-V" }
+toolchain = "stable"
+install_crate = { crate_name = "cargo-vet", version = "0.10.1", binary = "cargo-vet", test_arg = "-V" }
 command = "cargo"
 args = ["vet", "check"]
 
@@ -183,28 +202,32 @@ run_task = { name = [
 ] }
 
 [tasks.check-fmt]
-dependencies = ["check-fmt-rust", "check-fmt-toml"]
+dependencies = [
+    "check-fmt-rust",
+    "check-fmt-toml",
+    "check-fmt-c",
+]
 description = "Check file formatting"
 
 [tasks.fmt]
-dependencies = ["fmt-rust", "fmt-toml"]
+dependencies = [
+    "fmt-rust",
+    "fmt-toml",
+    "fmt-c",
+]
 description = "Format files"
 
 [tasks.check-fmt-rust]
 category = "correctness"
 description = "Check rust code formatting"
-toolchain = "${NIGHTLY}"
-command = "cargo"
-args = ["fmt", "--all", "--", "--check"]
-dependencies = ["install-nightly"]
+command = "scripts/cargo-fmt.sh"
+args = ["--all", "--", "--check"]
 
 [tasks.fmt-rust]
 category = "correctness"
 description = "Format rust code"
-toolchain = "${NIGHTLY}"
-command = "cargo"
-args = ["fmt", "--all"]
-dependencies = ["install-nightly"]
+command = "scripts/cargo-fmt.sh"
+args = ["--all"]
 
 [tasks.check-fmt-toml]
 category = "correctness"
@@ -218,9 +241,20 @@ description = "Format toml"
 script = "git ls-files -z '*.toml' | xargs -0 taplo fmt"
 dependencies = ["install-taplo"]
 
+[tasks.check-fmt-c]
+category = "correctness"
+description = "Check C formatting"
+script = "git ls-files -z '*.c' '*.h' | xargs -0 -- clang-format --Werror --dry-run"
+
+[tasks.fmt-c]
+category = "correctness"
+description = "Format C"
+script = "git ls-files -z '*.c' '*.h' | xargs -0 -- clang-format --Werror -i"
+
 [tasks.install-taplo]
 private = true
-install_crate = { crate_name = "taplo-cli", version = "0.9.3", binary = "taplo", test_arg = ["-V"] }
+toolchain = "stable"
+install_crate = { crate_name = "taplo-cli", version = "0.10.0", binary = "taplo", test_arg = ["-V"] }
 
 [tasks.check-features]
 category = "correctness"
@@ -243,20 +277,20 @@ cargo clippy --all-targets --all-features
 install_crate = { rustup_component_name = "clippy" }
 
 [tasks.machete]
+toolchain = "stable"
 command = "cargo"
 args = ["machete"]
-install_crate = { crate_name = "cargo-machete", version = "0.8.0", binary = "cargo-machete", test_arg = "--version" }
+install_crate = { crate_name = "cargo-machete", version = "0.9.1", binary = "cargo-machete", test_arg = "--version" }
 
 
 # Docs
-[tasks.gen-docs-nightly]
+[tasks.gen-docs]
 category = "docs"
-description = "Generate docs with rust nightly"
-toolchain = "${NIGHTLY}"
-env = { RUSTDOCFLAGS = "--cfg docsrs ${RUSTDOCFLAGS}" }
+description = "Generate docs"
+env.RUSTC_BOOTSTRAP = "1"
+env.RUSTDOCFLAGS = "--cfg docsrs ${RUSTDOCFLAGS}"
 command = "cargo"
 args = ["doc", "--all-features"]
-dependencies = ["install-nightly"]
 
 [tasks.tgz-docs]
 category = "docs"
@@ -264,12 +298,6 @@ description = "Archive Rust docs"
 script = "tar -czf rust-docs.tar.gz -C target/doc ."
 
 # Misc
-[tasks.install-nightly]
-description = "Install nightly rust"
-# First check if the toolchain is installed, because that is much faster.
-# Don't do this if you want to keep a rolling channel up-to-date.
-script = "rustup run ${NIGHTLY} true 2>/dev/null || rustup toolchain install ${NIGHTLY} --profile minimal -c rustfmt"
-
 [tasks.git-unchanged]
 description = "Verify files are unchanged"
 script = '''
@@ -283,7 +311,8 @@ fi
 
 [tasks.install-cargo-all-features]
 private = true
-install_crate = { crate_name = "cargo-all-features", version = "1.10.0", binary = "cargo-check-all-features", test_arg = ["-V"] }
+toolchain = "stable"
+install_crate = { crate_name = "cargo-all-features", version = "1.12.0", binary = "cargo-check-all-features", test_arg = ["-V"] }
 
 
 # Examples
@@ -294,14 +323,26 @@ category = "examples"
 description = "Run C example application"
 cwd = "examples/c"
 script = "./run.bash"
-dependencies = ["build-capi-header", "build-capi-lib-experimental"]
+dependencies = ["build-capi-lib-experimental"]
 
 # Rust Example
 [tasks.run-rust-example]
 category = "examples"
 description = "Run Rust example application"
-cwd = "examples/rust"
+cwd = "examples/rust/aranya-example"
 script = "./run.bash"
+
+[tasks.run-rust-example-multi-node]
+category = "examples"
+description = "Run Rust example application on multiple nodes"
+cwd = "examples/rust/aranya-example-multi-node"
+script = "./run.bash"
+
+# Duvet
+[tasks.duvet]
+category = "correctness"
+description = "Run duvet requirements coverage report"
+command = "scripts/duvet-report.bash"
 
 # Metrics
 
@@ -312,8 +353,8 @@ description = "Run Metrics Crate"
 script = '''
 #!/usr/bin/env bash
 set -e
-cargo build --bin aranya-daemon --release --features=experimental,aqc
-cargo build --bin aranya-metrics --release --features=aqc
+cargo build --bin aranya-daemon --release --features=preview
+cargo build --bin aranya-metrics --release
 CONFIG_PATH=$(pwd)/crates/aranya-metrics/example-metrics.toml $(pwd)/target/release/aranya-metrics $(pwd)/target/release/aranya-daemon
 '''
 
