@@ -247,6 +247,8 @@ impl EffectHandler {
                 RoleAssigned(_) => {}
                 RoleRevoked(_) => {}
                 CameraTaskReceived(_) => {}
+                MapSysIdReceived(_) => {}
+                TaskDroneReceived(_) => {}
                 LabelCreated(_) => {}
                 LabelDeleted(_) => {}
                 AssignedLabelToDevice(_) => {}
