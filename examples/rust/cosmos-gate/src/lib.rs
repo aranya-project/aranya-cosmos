@@ -263,9 +263,56 @@ pub async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSumm
     }
 }
 
+/// Hardcoded stub ctrl bytes for Phase 2 iteration 1.
+/// Replaced with real TaskDrone() output when engineering delivers.
+const STUB_CTRL_BYTES: &[u8] = &[
+    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+    0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7,
+];
+
+/// Request body for the MAVLink authorization endpoint.
+#[derive(Deserialize)]
+pub struct MavlinkCMD {
+    pub sysid: u8,
+    pub command: u16,
+    pub target_system: u8,
+}
+
+/// Handle MAVLink command authorization requests.
+///
+/// Returns stub ctrl bytes for Phase 2 iteration 1 (no Aranya daemon needed).
+/// The REST contract is final: only the backend changes when real `TaskDrone()`
+/// is available.
+pub async fn handle_mavlink(Json(body): Json<MavlinkCMD>) -> Response {
+    info!(
+        sysid = body.sysid,
+        command = body.command,
+        target_system = body.target_system,
+        "POST /authorize/mavlink"
+    );
+
+    // Stub: return hardcoded ctrl bytes.
+    // TODO: Replace with TaskDrone(body.sysid, body.command, body.target_system)
+    // when the engineering team delivers the real API.
+    info!(
+        ctrl_len = STUB_CTRL_BYTES.len(),
+        sysid = body.sysid,
+        command = body.command,
+        target_system = body.target_system,
+        "returning stub ctrl bytes"
+    );
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, "application/octet-stream")],
+        STUB_CTRL_BYTES,
+    )
+        .into_response()
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/authorize", post(handle_post))
+        .route("/authorize/mavlink", post(handle_mavlink))
         .with_state(state)
 }
 
