@@ -3985,6 +3985,160 @@ ephemeral command TaskCamera {
 }
 ```
 
+
+
+1. Operator A calls COSMOS `SMALL_IMAGE` command for CameraApp1
+2. COSMOS cmd gets routed to Aranya via dispatcher (must include name of target app to Aranya)
+3. Aranya reads the target app from received request and calls the action to create `TaskCameraApp1` (Aranya) command
+4. Aranya receives back the serialized `TaskCameraApp1` (Aranya) command and appends that to the COSMOS `SMALL_IMAGE` command.
+5. COSMOS command received by cFS app: AranyaCameraApp1 which extracts the serialized Aranya command from the COSMOS command and provides it to Aranya via the "accept_eph_cmd" API
+6. The Aranya API deserializes the `TaskCameraApp1` command and processes it against policy, where the author of the command is checked to ensure it is allowed to task this app
+   1. i.e., Operator A must have general perms to issue any command to the CameraApp1 cFS app
+   2. Additionally, the Aranya command could include a check that requires the operator to have perms to issue the specific `SMALL_IMAGE` command onto this app -- all within the same Aranya command
+7. If the Aranya command passes all the checks, the returned effect goes up to the client so that the cFS CameraApp1 can be commanded with the `SMALL_IMAGE` command (known to AranyaCameraApp1 from the COSMOS command it received)
+
+
+## MapSysId
+
+Maps a MAVLINK system ID to the Device ID of an Aranya peer. A full policy written specifically for
+drone architecture should ensure system ID mapping is part of the onboarding and offboarding
+process of all participants.
+
+```policy
+fact SystemId[sys_id int]=>{device_id id}
+
+action map_sys_id(system_id int, peer_id id) {
+    publish MapSysId {
+        system_id: system_id,
+        peer_id: peer_id,
+    }
+}
+
+effect MapSysIdReceived {
+    system_id int,
+    peer_id id,
+}
+
+command MapSysId {
+    fields {
+        system_id int,
+        peer_id id,
+    }
+
+    seal { return seal_command(serialize(this)) }
+    open { return deserialize(open_envelope(envelope)) }
+
+    policy {
+        let author = get_valid_device(envelope::author_id(envelope))
+        check is_owner(author.role)
+
+        // System ID must be between 1 and 255 and cannot already be mapped to a Device ID.
+        check this.system_id > 0 && this.system_id < 256
+        check !exists SystemId[sys_id: this.system_id]
+
+        // An Owner can map itself to any System ID. Otherwise, the peer Device ID must be valid.
+        if author.device_id != this.peer_id {
+            let peer = get_valid_device(this.peer_id)
+
+            // Only an Owner or Operator can map to System ID 255 (ground station)
+            if this.system_id == 255 {
+                check is_owner(peer.role) || is_operator(peer.role)
+            }
+        }
+
+        finish {
+            create SystemId[sys_id: this.system_id]=>{device_id: this.peer_id}
+
+            emit MapSysIdReceived {
+                system_id: this.system_id,
+                peer_id: this.peer_id,
+            }
+        }
+    }
+}
+```
+
+
+## TaskDrone
+
+Command for tasking a drone. For the UAV integration demo, the ground operator will send a command
+that tasks the drone.
+
+```policy
+ephemeral action task_drone() {
+    publish TaskDrone{}
+}
+
+effect TaskDroneReceived {
+    task_id int,
+    recipient int,
+}
+
+ephemeral command TaskDrone {
+    fields {}
+
+    seal { return seal_command(serialize(this)) }
+    open { return deserialize(open_envelope(envelope)) }
+
+    policy {
+        let author = get_valid_device(envelope::author_id(envelope))
+        let our_id = device::current_device_id()
+
+        // Only the author and valid drone members can process this command.
+        if our_id != author.device_id {
+            let our_device = get_valid_device(our_id)
+            check is_member(our_device.role)
+        }
+
+        // TODO: create MAVLINK FFI to get `SYSID` (sender ID), `command` (task ID), and
+        //      `target_system` (receiver ID) from the MAVLINK msg.
+        let sender_sys_id = mavlink::get_sender_sys_id()
+
+        // The author must map to the sender's System ID and be either an Owner or Operator.
+        let sender = check_unwrap query SystemId[sys_id: sender_sys_id]=>{device_id: ?}
+        check sender.device_id == author.device_id
+        check is_owner(author.role) || is_operator(author.role)
+
+        // TODO: option for task-level checks (e.g., `command` == 21 for landing task).
+        // let task_id == mavlink::get_task_id()
+        // if task_id == 21 {
+        //     check ___
+        // }
+
+        // For a point-to-point message, the receiver's system ID must map to a valid device.
+        let receiver_sys_id = mavlink::get_target_sys_id()
+        if receiver_sys_id != 0 {
+            let receiver = check_unwrap query SystemId[sys_id: receiver_sys_id]=>{device_id: ?}
+
+            // TODO: option for target-level checks (e.g., `target_system` == 8 for specific drone).
+            // if target_sys_id == 8 {
+            //     check ___
+            // }
+
+            // Emit the effect if the target receiver is processing the command.
+            if receiver.device_id == our_id {
+                finish {
+                    emit TaskDroneReceived {
+                        task_id: task_id,
+                        recipient: peer_id,
+                    }
+                }
+            }
+        }
+
+        // Emit the effect to all valid drones processing the broadcast message.
+        if our_id != author.device_id {
+            finish {
+                emit TaskDroneReceived {
+                    task_id: task_id,
+                    recipient: peer_id,
+                }
+            }
+        }
+    }
+}
+```
+
 [device-ffi]: https://crates.io/crates/aranya-device-ffi
 [effects]: https://aranya-project.github.io/policy-book/reference/top-level/effects.html
 [envelope]: https://aranya-project.github.io/policy-book/reference/top-level/commands.html#envelope-type
