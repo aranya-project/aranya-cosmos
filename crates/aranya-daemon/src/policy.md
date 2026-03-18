@@ -101,6 +101,7 @@ use device
 use envelope
 use idam
 use perspective
+use mavlink
 ```
 
 - [`afc`][afc-ffi]: [AFC][afc] functionality, such as creating
@@ -1953,6 +1954,16 @@ function get_assigned_role(device_id id) struct Role {
 // Reports whether the provided role represents the default owner role.
 function is_owner(role struct Role) bool {
     return role.default && role.name == "owner"
+}
+
+// Reports whether the provided role represents the default operator role.
+function is_operator(role struct Role) bool {
+    return role.default && role.name == "operator"
+}
+
+// Reports whether the provided role represents the default member role.
+function is_member(role struct Role) bool {
+    return role.default && role.name == "member"
 }
 
 // Returns the ID of the role assigned to the device.
@@ -4020,6 +4031,10 @@ effect MapSysIdReceived {
 }
 
 command MapSysId {
+    attributes {
+        priority: 200
+    }
+
     fields {
         system_id int,
         peer_id id,
@@ -4029,9 +4044,9 @@ command MapSysId {
     open { return deserialize(open_envelope(envelope)) }
 
     policy {
-        let author = get_author(envelope::author_id(envelope))
+        let author = get_author(envelope)
         let author_role = get_assigned_role(author.device_id)
-        check is_owner(author.role)
+        check is_owner(author_role)
 
         // System ID must be between 1 and 255 and cannot already be mapped to a Device ID.
         check this.system_id > 0 && this.system_id < 256
@@ -4083,7 +4098,7 @@ ephemeral command TaskDrone {
     open { return deserialize(open_envelope(envelope)) }
 
     policy {
-        let author = get_author(envelope::author_id(envelope))
+        let author = get_author(envelope)
         let our_id = device::current_device_id()
 
         // Only the author and valid drone members can process this command.
@@ -4103,7 +4118,7 @@ ephemeral command TaskDrone {
         let author_role = get_assigned_role(author.device_id)
         check is_owner(author_role) || is_operator(author_role)
 
-        let task_id == mavlink::get_task_id()
+        let task_id = mavlink::get_task_id()
         // TODO: option for task-level checks (e.g., `command` == 21 for landing task).
         // if task_id == 21 {
         //     check ___
