@@ -44,8 +44,6 @@ use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::actions::SessionData;
 #[cfg(feature = "afc")]
-use crate::actions::SessionData;
-#[cfg(feature = "afc")]
 use crate::afc::Afc;
 use crate::{
     actions::Actions,
@@ -246,6 +244,7 @@ impl EffectHandler {
                 DeviceRemoved(_) => {}
                 RoleAssigned(_) => {}
                 RoleRevoked(_) => {}
+                CameraTaskReceived(_) => {}
                 LabelCreated(_) => {}
                 LabelDeleted(_) => {}
                 AssignedLabelToDevice(_) => {}
@@ -1012,6 +1011,58 @@ impl DaemonApi for Api {
         });
     }
 
+    async fn task_camera(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        task_name: Text,
+        peer: api::DeviceId,
+    ) -> api::Result<Box<[u8]>> {
+        let graph = self.check_team_valid(team).await?;
+
+        let SessionData {
+            #[cfg(feature = "afc")]
+            ctrl,
+            effects,
+        } = self
+            .client
+            .actions(graph)
+            .task_camera(task_name, DeviceId::transmute(peer))
+            .await?;
+        #[cfg(feature = "afc")]
+        let ctrl = get_single_cmd(ctrl)?;
+        #[cfg(not(feature = "afc"))]
+        let ctrl = Box::default();
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        Ok(ctrl)
+    }
+
+    async fn receive_cosmos_ctrl(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        task_name: Text,
+        ctrl: Box<[u8]>,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+
+        let mut session = self.client.session_new(graph).await?;
+
+        let effects = self.client.session_receive(&mut session, &ctrl).await?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        let [Effect::CameraTaskReceived(e)] = effects.as_slice() else {
+            return Err(anyhow!("unexpected effects").into());
+        };
+        if e.task_name != task_name {
+            return Err(anyhow!("invalid task name").into());
+        }
+
+        Ok(())
+    }
+
+    /// Create a label.
     #[instrument(skip(self), err)]
     async fn create_label(
         self,
@@ -1483,7 +1534,7 @@ impl From<Perm> for api::Perm {
     }
 }
 
-/// Extract a single command from the session commands to get the AFC control message.
+/// Extract a single session command.
 #[cfg(feature = "afc")]
 fn get_single_cmd(cmds: Vec<Box<[u8]>>) -> anyhow::Result<Box<[u8]>> {
     let mut cmds = cmds.into_iter();
