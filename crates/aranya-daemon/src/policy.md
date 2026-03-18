@@ -4029,7 +4029,8 @@ command MapSysId {
     open { return deserialize(open_envelope(envelope)) }
 
     policy {
-        let author = get_valid_device(envelope::author_id(envelope))
+        let author = get_author(envelope::author_id(envelope))
+        let author_role = get_assigned_role(author.device_id)
         check is_owner(author.role)
 
         // System ID must be between 1 and 255 and cannot already be mapped to a Device ID.
@@ -4038,11 +4039,12 @@ command MapSysId {
 
         // An Owner can map itself to any System ID. Otherwise, the peer Device ID must be valid.
         if author.device_id != this.peer_id {
-            let peer = get_valid_device(this.peer_id)
+            let peer = get_device(this.peer_id)
+            let peer_role = get_assigned_role(this.peer_id)
 
             // Only an Owner or Operator can map to System ID 255 (ground station)
             if this.system_id == 255 {
-                check is_owner(peer.role) || is_operator(peer.role)
+                check is_owner(peer_role) || is_operator(peer_role)
             }
         }
 
@@ -4081,13 +4083,14 @@ ephemeral command TaskDrone {
     open { return deserialize(open_envelope(envelope)) }
 
     policy {
-        let author = get_valid_device(envelope::author_id(envelope))
+        let author = get_author(envelope::author_id(envelope))
         let our_id = device::current_device_id()
 
         // Only the author and valid drone members can process this command.
         if our_id != author.device_id {
-            let our_device = get_valid_device(our_id)
-            check is_member(our_device.role)
+            let our_device = get_device(our_id)
+            let our_role = get_assigned_role(our_id)
+            check is_member(our_role)
         }
 
         // TODO: create MAVLINK FFI to get `SYSID` (sender ID), `command` (task ID), and
@@ -4097,10 +4100,11 @@ ephemeral command TaskDrone {
         // The author must map to the sender's System ID and be either an Owner or Operator.
         let sender = check_unwrap query SystemId[sys_id: sender_sys_id]=>{device_id: ?}
         check sender.device_id == author.device_id
-        check is_owner(author.role) || is_operator(author.role)
+        let author_role = get_assigned_role(author.device_id)
+        check is_owner(author_role) || is_operator(author_role)
 
+        let task_id == mavlink::get_task_id()
         // TODO: option for task-level checks (e.g., `command` == 21 for landing task).
-        // let task_id == mavlink::get_task_id()
         // if task_id == 21 {
         //     check ___
         // }
@@ -4120,7 +4124,7 @@ ephemeral command TaskDrone {
                 finish {
                     emit TaskDroneReceived {
                         task_id: task_id,
-                        recipient: peer_id,
+                        recipient: receiver_sys_id,
                     }
                 }
             }
@@ -4131,7 +4135,7 @@ ephemeral command TaskDrone {
             finish {
                 emit TaskDroneReceived {
                     task_id: task_id,
-                    recipient: peer_id,
+                    recipient: receiver_sys_id,
                 }
             }
         }
