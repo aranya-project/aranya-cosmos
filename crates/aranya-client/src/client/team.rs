@@ -494,8 +494,6 @@ impl Team<'_> {
     #[instrument(skip(self))]
     pub async fn map_sys_id(
         &self,
-        label_name: Text,
-        rank: Rank,
         system_id: u8,
         peer_id: DeviceId,
     ) -> Result<()> {

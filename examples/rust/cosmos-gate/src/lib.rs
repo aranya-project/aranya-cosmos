@@ -263,13 +263,6 @@ pub async fn handle_post(State(state): State<AppState>, Json(body): Json<CMDSumm
     }
 }
 
-/// Hardcoded stub ctrl bytes for Phase 2 iteration 1.
-/// Replaced with real TaskDrone() output when engineering delivers.
-const STUB_CTRL_BYTES: &[u8] = &[
-    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
-    0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7,
-];
-
 /// Request body for the MAVLink authorization endpoint.
 #[derive(Deserialize)]
 pub struct MavlinkCMD {
@@ -280,10 +273,11 @@ pub struct MavlinkCMD {
 
 /// Handle MAVLink command authorization requests.
 ///
-/// Returns stub ctrl bytes for Phase 2 iteration 1 (no Aranya daemon needed).
-/// The REST contract is final: only the backend changes when real `TaskDrone()`
-/// is available.
-pub async fn handle_mavlink(Json(body): Json<MavlinkCMD>) -> Response {
+/// Calls `task_drone()` to produce real Aranya ctrl bytes for the command.
+pub async fn handle_mavlink(
+    State(state): State<AppState>,
+    Json(body): Json<MavlinkCMD>,
+) -> Response {
     info!(
         sysid = body.sysid,
         command = body.command,
@@ -291,22 +285,33 @@ pub async fn handle_mavlink(Json(body): Json<MavlinkCMD>) -> Response {
         "POST /authorize/mavlink"
     );
 
-    // Stub: return hardcoded ctrl bytes.
-    // TODO: Replace with TaskDrone(body.sysid, body.command, body.target_system)
-    // when the engineering team delivers the real API.
-    info!(
-        ctrl_len = STUB_CTRL_BYTES.len(),
-        sysid = body.sysid,
-        command = body.command,
-        target_system = body.target_system,
-        "returning stub ctrl bytes"
-    );
-    (
-        StatusCode::OK,
-        [(CONTENT_TYPE, "application/octet-stream")],
-        STUB_CTRL_BYTES,
-    )
-        .into_response()
+    let owner_team = state.owner.team(state.owner_team_id);
+
+    match owner_team.task_drone().await {
+        Ok(ctrl_bytes) => {
+            info!(
+                ctrl_len = ctrl_bytes.len(),
+                sysid = body.sysid,
+                command = body.command,
+                target_system = body.target_system,
+                "produced ctrl bytes via task_drone()"
+            );
+            (
+                StatusCode::OK,
+                [(CONTENT_TYPE, "application/octet-stream")],
+                ctrl_bytes,
+            )
+                .into_response()
+        }
+        Err(e) => {
+            warn!(error = %e, "task_drone() failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task_drone failed: {e}"),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -391,6 +396,20 @@ pub async fn initialize_or_return(
         .assign_role(member_role.id)
         .await?;
     info!("member role assigned");
+
+    // Map GCS (sysid 255) -> owner device
+    owner_team
+        .map_sys_id(255, owner.id)
+        .await
+        .context("map_sys_id for GCS (owner)")?;
+    info!("mapped sysid 255 (GCS) -> owner device");
+
+    // Map PX4 (sysid 1) -> member device
+    owner_team
+        .map_sys_id(1, member.id)
+        .await
+        .context("map_sys_id for PX4 (member)")?;
+    info!("mapped sysid 1 (PX4) -> member device");
 
     // Setup sync peers.
     let sync_interval = Duration::from_millis(400);
