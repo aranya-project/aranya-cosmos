@@ -287,7 +287,13 @@ pub async fn handle_mavlink(
 
     let owner_team = state.owner.team(state.owner_team_id);
 
-    match owner_team.task_drone().await {
+    let mavdata = aranya_client::MavData {
+        sender_sys_id: body.sysid,
+        target_sys_id: body.target_system,
+        task_id: body.command,
+    };
+
+    match owner_team.task_drone(mavdata).await {
         Ok(ctrl_bytes) => {
             info!(
                 ctrl_len = ctrl_bytes.len(),

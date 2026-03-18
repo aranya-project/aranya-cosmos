@@ -577,6 +577,6 @@ pub trait DaemonApi {
     async fn receive_cosmos_ctrl(team: TeamId, task_name: Text, ctrl: Box<[u8]>) -> Result<()>;
 
     async fn map_sys_id(team: TeamId, system_id: u8, peer_id: DeviceId) -> Result<()>;
-    async fn task_drone(team: TeamId) -> Result<Box<[u8]>>;
+    async fn task_drone(team: TeamId, mavdata: MavData) -> Result<Box<[u8]>>;
     async fn receive_mavlink_ctrl(team: TeamId, mavdata: MavData, ctrl: Box<[u8]>) -> Result<()>;
 }

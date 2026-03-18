@@ -1436,10 +1436,21 @@ impl DaemonApi for Api {
     }
 
     #[instrument(skip(self), err)]
-    async fn task_drone(self, _: context::Context, team: api::TeamId) -> api::Result<Box<[u8]>> {
+    async fn task_drone(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        mavdata: api::MavData,
+    ) -> api::Result<Box<[u8]>> {
         let graph = self.check_team_valid(team).await?;
 
-        let SessionData { ctrl, effects } = self.client.actions(graph).task_drone().await?;
+        let SessionData { ctrl, effects } = {
+            let mut mavlink = self.mavlink.lock().await;
+            mavlink.set(mavdata).context("could not set mavdata")?;
+            let res = self.client.actions(graph).task_drone().await;
+            mavlink.clear().context("could not clear mavdata")?;
+            res?
+        };
         let ctrl = get_single_cmd(ctrl)?;
         self.effect_handler.handle_effects(graph, &effects).await?;
 

@@ -508,11 +508,11 @@ impl Team<'_> {
 
     /// Issue a drone task command.
     #[instrument(skip(self))]
-    pub async fn task_drone(&self) -> Result<Box<[u8]>> {
+    pub async fn task_drone(&self, mavdata: MavData) -> Result<Box<[u8]>> {
         let ctrl = self
             .client
             .daemon
-            .task_drone(create_ctx(), self.id)
+            .task_drone(create_ctx(), self.id, mavdata)
             .await
             .map_err(IpcError::new)?
             .map_err(aranya_error)?;

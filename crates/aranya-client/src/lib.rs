@@ -32,6 +32,7 @@ pub mod config;
 pub mod error;
 mod util;
 
+pub use aranya_daemon_api::MavData;
 pub use aranya_policy_text::{text, Text};
 pub use aranya_util::Addr;
 
