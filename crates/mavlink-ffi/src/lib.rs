@@ -29,7 +29,7 @@ impl Handle {
 
     pub fn clear(&mut self) -> Result<(), DataMissing> {
         let mut guard = self.shared.lock().expect("poisoned");
-        if guard.is_some() {
+        if guard.is_none() {
             return Err(DataMissing);
         }
         *guard = None;

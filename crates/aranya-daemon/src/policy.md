@@ -4153,6 +4153,9 @@ ephemeral command TaskDrone {
                     recipient: receiver_sys_id,
                 }
             }
+        } else {
+            // Author side — no effect needed.
+            finish {}
         }
     }
 }
