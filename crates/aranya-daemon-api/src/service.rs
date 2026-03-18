@@ -365,6 +365,13 @@ pub enum Perm {
     CreateAfcUniChannel,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MavData {
+    pub sender_sys_id: u8,
+    pub target_sys_id: u8,
+    pub task_id: u16,
+}
+
 // TODO(jdygert): tarpc does not cfg return types properly.
 #[cfg(not(feature = "afc"))]
 use afc_stub::{AfcReceiveChannelInfo, AfcSendChannelInfo, AfcShmInfo};
@@ -568,4 +575,8 @@ pub trait DaemonApi {
     async fn task_camera(team: TeamId, task_name: Text, peer: DeviceId) -> Result<Box<[u8]>>;
     /// Receive and verify a COSMOS control message.
     async fn receive_cosmos_ctrl(team: TeamId, task_name: Text, ctrl: Box<[u8]>) -> Result<()>;
+
+    async fn map_sys_id(team: TeamId, system_id: u8, peer_id: DeviceId) -> Result<()>;
+    async fn task_drone(team: TeamId) -> Result<Box<[u8]>>;
+    async fn receive_mavlink_ctrl(team: TeamId, mavdata: MavData, ctrl: Box<[u8]>) -> Result<()>;
 }

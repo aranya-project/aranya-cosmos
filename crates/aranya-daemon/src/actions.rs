@@ -11,9 +11,7 @@ use aranya_daemon_api::Rank;
 use aranya_keygen::PublicKeys;
 use aranya_policy_ifgen::{Actionable, VmEffect};
 use aranya_policy_text::Text;
-#[cfg(feature = "afc")]
-use aranya_runtime::NullSink;
-use aranya_runtime::{GraphId, PolicyStore, Session, StorageProvider, VmPolicy};
+use aranya_runtime::{GraphId, NullSink, PolicyStore, Session, StorageProvider, VmPolicy};
 use futures_util::TryFutureExt as _;
 use tracing::{debug, instrument, warn, Instrument};
 
@@ -27,7 +25,6 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct SessionData {
     /// The serialized messages
-    #[cfg(feature = "afc")]
     pub ctrl: Vec<Box<[u8]>>,
     /// The effects produced
     pub effects: Vec<Effect>,
@@ -144,7 +141,6 @@ where
             act.with_action(|act| session.action(&client, &mut sink, &mut msg_sink, act))?;
         }
         Ok(SessionData {
-            #[cfg(feature = "afc")]
             ctrl: msg_sink.into_cmds(),
             effects: sink.collect()?,
         })
@@ -471,6 +467,24 @@ where
         peer_id: DeviceId,
     ) -> impl Future<Output = Result<SessionData>> + Send {
         self.call_session_action(policy::task_camera(task_name, peer_id.as_base()))
+            .in_current_span()
+    }
+
+    /// Invokes `map_sys_id`.
+    #[instrument(skip(self))]
+    fn map_sys_id(
+        &self,
+        system_id: u8,
+        peer_id: DeviceId,
+    ) -> impl Future<Output = Result<Vec<Effect>>> + Send {
+        self.call_persistent_action(policy::map_sys_id(system_id.into(), peer_id.as_base()))
+            .in_current_span()
+    }
+
+    /// Invokes `task_drone`.
+    #[instrument(skip(self))]
+    fn task_drone(&self) -> impl Future<Output = Result<SessionData>> + Send {
+        self.call_session_action(policy::task_drone())
             .in_current_span()
     }
 }

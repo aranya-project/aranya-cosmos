@@ -1,7 +1,9 @@
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("data was missing")]
 pub struct DataMissing;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("data was present")]
 pub struct DataPresent;
 
 impl From<DataMissing> for aranya_policy_vm::MachineError {

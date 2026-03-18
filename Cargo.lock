@@ -2589,8 +2589,9 @@ name = "mavlink-ffi"
 version = "0.0.0"
 dependencies = [
  "aranya-crypto",
+ "aranya-daemon-api",
  "aranya-policy-vm",
- "serde",
+ "thiserror 2.0.12",
 ]
 
 [[package]]

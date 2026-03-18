@@ -14,7 +14,9 @@ workspace = true
 
 
 [dependencies]
+aranya-daemon-api = { workspace = true }
+
 aranya-crypto = { workspace = true }
 aranya-policy-vm = { workspace = true, features = ["derive"] }
 
-serde = { workspace = true }
+thiserror = { workspace = true }

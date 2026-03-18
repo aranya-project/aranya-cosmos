@@ -1025,19 +1025,12 @@ impl DaemonApi for Api {
     ) -> api::Result<Box<[u8]>> {
         let graph = self.check_team_valid(team).await?;
 
-        let SessionData {
-            #[cfg(feature = "afc")]
-            ctrl,
-            effects,
-        } = self
+        let SessionData { ctrl, effects } = self
             .client
             .actions(graph)
             .task_camera(task_name, DeviceId::transmute(peer))
             .await?;
-        #[cfg(feature = "afc")]
         let ctrl = get_single_cmd(ctrl)?;
-        #[cfg(not(feature = "afc"))]
-        let ctrl = Box::default();
         self.effect_handler.handle_effects(graph, &effects).await?;
 
         Ok(ctrl)
@@ -1420,6 +1413,67 @@ impl DaemonApi for Api {
             Err(anyhow!("rank not found for object").into())
         }
     }
+
+    #[instrument(skip(self), err)]
+    async fn map_sys_id(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        system_id: u8,
+        peer_id: api::DeviceId,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+
+        let effects = self
+            .client
+            .actions(graph)
+            .map_sys_id(system_id, DeviceId::transmute(peer_id))
+            .await
+            .context("unable to add system ID mapping")?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn task_drone(self, _: context::Context, team: api::TeamId) -> api::Result<Box<[u8]>> {
+        let graph = self.check_team_valid(team).await?;
+
+        let SessionData { ctrl, effects } = self.client.actions(graph).task_drone().await?;
+        let ctrl = get_single_cmd(ctrl)?;
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        Ok(ctrl)
+    }
+
+    #[instrument(skip(self), err)]
+    async fn receive_mavlink_ctrl(
+        self,
+        _: context::Context,
+        team: api::TeamId,
+        mavdata: api::MavData,
+        ctrl: Box<[u8]>,
+    ) -> api::Result<()> {
+        let graph = self.check_team_valid(team).await?;
+
+        let mut session = self.client.session_new(graph).await?;
+
+        let effects = {
+            let mut mavlink = self.mavlink.lock().await;
+            mavlink.set(mavdata).context("could not set mavdata")?;
+            let res = self.client.session_receive(&mut session, &ctrl).await;
+            mavlink.clear().context("could not clear mavdata")?;
+            res?
+        };
+
+        self.effect_handler.handle_effects(graph, &effects).await?;
+
+        // let [Effect::TaskDroneReceived(e)] = effects.as_slice() else {
+        //     return Err(anyhow!("unexpected effects").into());
+        // };
+
+        Ok(())
+    }
 }
 
 impl Api {
@@ -1540,7 +1594,6 @@ impl From<Perm> for api::Perm {
 }
 
 /// Extract a single session command.
-#[cfg(feature = "afc")]
 fn get_single_cmd(cmds: Vec<Box<[u8]>>) -> anyhow::Result<Box<[u8]>> {
     let mut cmds = cmds.into_iter();
     let msg = cmds.next().context("missing ephemeral command")?;

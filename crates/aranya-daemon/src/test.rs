@@ -232,7 +232,7 @@ impl TestCtx {
 
             let pk = bundle.public_keys(&eng, &store)?;
 
-            let (policy, mavlink) = PolicyEngine::new(
+            let (policy, _mavlink) = PolicyEngine::new(
                 POLICY_SOURCE,
                 eng,
                 store.try_clone().context("unable to clone keystore")?,
