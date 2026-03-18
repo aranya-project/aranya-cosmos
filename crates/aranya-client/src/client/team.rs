@@ -449,29 +449,6 @@ impl Team<'_> {
         Ok(label)
     }
 
-    /// Issue a COSMOS camera task command.
-    pub async fn task_camera(&self, task_name: Text, peer: DeviceId) -> Result<Box<[u8]>> {
-        let ctrl = self
-            .client
-            .daemon
-            .task_camera(create_ctx(), self.id, task_name, peer.into_api())
-            .await
-            .map_err(IpcError::new)?
-            .map_err(aranya_error)?;
-        Ok(ctrl)
-    }
-
-    /// Receive and verify a COSMOS control message.
-    pub async fn receive_cosmos_ctrl(&self, task_name: Text, ctrl: Box<[u8]>) -> Result<()> {
-        self.client
-            .daemon
-            .receive_cosmos_ctrl(create_ctx(), self.id, task_name, ctrl)
-            .await
-            .map_err(IpcError::new)?
-            .map_err(aranya_error)?;
-        Ok(())
-    }
-
     /// Returns the list of labels on the team.
     #[instrument(skip(self))]
     pub async fn labels(&self) -> Result<Labels> {

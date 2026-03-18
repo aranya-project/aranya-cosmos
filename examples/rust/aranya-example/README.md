@@ -1,29 +1,27 @@
-# Example Rust Application
+# Aranya Examples
 
-This crate contains example code showing how to use Aranya in a Rust application.
+Specific examples of how to use the Aranya client Rust API.
 
-This example shows how to use the [`aranya-client`](../../crates/aranya-client) library to:
-- Setup a team
-- Sync Aranya graphs
-- Create and AFC (Aranya Fast Channel) and encrypt/decrypt data with open/seal operations.
+Each example can be built then run as a stand-alone executable.
 
-During setup, the example application starts an instance of the [`aranya-daemon`](../../crates/aranya-daemon) for each Aranya device in the background. [The daemon](https://aranya-project.github.io/aranya-docs/technical-apis/rust-api/#aranya-daemon) handles low-level operations such as automatically syncing graph states between different devices so that [the client](https://aranya-project.github.io/aranya-docs/technical-apis/rust-api/#aranya-client) can focus on the operations it wants to perform on the team.
+Before running the examples, ensure [cargo-make](https://github.com/sagiegurari/cargo-make?tab=readme-ov-file#installation) is installed.
 
-# Running the example with cargo-make
-Install the [Rust toolchain](https://www.rust-lang.org/tools/install), this will install the toolchain manager `rustup`, the rust compiler `rustc` and package manager/build tool `cargo`.
+# Single-node Example
 
-Install [cargo-make](https://github.com/sagiegurari/cargo-make?tab=readme-ov-file#installation) (v0.37.23).
+How to run the example:
+`cargo make run-rust-example`
 
-```bash
-# First, download the source code from this repository:
-$ git clone git@github.com:aranya-project/aranya.git
+Runs an example which sets up an Aranya team with `owner`, `admin`, `operator`, `membera`, and `memberb` devices. The `operator` creates a label and assigns it to `membera` and `memberb`. The member devices use this label to create a secure AFC channel between them.
 
-# Change into the directory
-$ cd aranya
+Once the secure AFC channel has been created, the devices seal and open data via the channel.
 
-# Run the make command
-$ cargo make run-rust-example
-```
+More information can be found in the [README.md](aranya-example/README.md)
 
-This starts the example and automatically runs through the aforementioned
-steps.
+# Multi-node Example
+
+How to run the example:
+`cargo make run-rust-example-multi-node`
+
+This example is essentially the same as the single node example except that each device runs code in its own executable. It is designed to allow each executable to be easily deployed to different machines.
+
+More information can be found in the [README.md](aranya-example-multi-node/README.md)

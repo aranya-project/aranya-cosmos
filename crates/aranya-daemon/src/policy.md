@@ -433,7 +433,6 @@ incremented each time the device is removed from the team.
 
 ```policy
 // Tracks the current logical generation for a device.
-
 //
 // Each time a device is removed from the team, its generation is
 // bumped so that stale per-device state (for example, direct
@@ -3928,63 +3927,6 @@ function afc_uni_channel_is_valid(sender_id id, receiver_id id, label_id id) boo
 [all-the-way-down]: https://en.wikipedia.org/wiki/Turtles_all_the_way_down
 [commands]: https://aranya-project.github.io/policy-book/reference/top-level/commands.html
 [crypto-ffi]: https://crates.io/crates/aranya-crypto-ffi
-## TaskCamera
-
-Command for tasking the camera app on a space vehicle. For the COSMOS integration demo, the ground
-operator will send a command that tasks the camera app.
-
-```policy
-ephemeral action task_camera(task_name string, peer_id id) {
-    publish TaskCamera{
-        task_name: task_name,
-        peer_id: peer_id,
-    }
-}
-
-effect CameraTaskReceived {
-    task_name string,
-    recipient id
-}
-
-ephemeral command TaskCamera {
-    fields {
-        task_name string,
-        peer_id id,
-    }
-
-    seal { return seal_command(serialize(this)) }
-    open { return deserialize(open_envelope(envelope)) }
-
-    policy {
-        check team_exists()
-
-        let author = get_author(envelope)
-        let author_role = get_assigned_role(author.device_id)
-        check is_owner(author_role)
-
-        let recipient = get_device(this.peer_id)
-
-        let our_id = device::current_device_id()
-
-        if our_id == author.device_id {
-            // We authored this command — nothing to emit on the sender side.
-            finish {}
-        } else if our_id == this.peer_id {
-            // We are the intended recipient.
-            finish {
-                emit CameraTaskReceived {
-                    task_name: this.task_name,
-                    recipient: this.peer_id,
-                }
-            }
-        } else {
-            // Only the author and recipient should process this command.
-            check false
-        }
-    }
-}
-```
-
 [device-ffi]: https://crates.io/crates/aranya-device-ffi
 [effects]: https://aranya-project.github.io/policy-book/reference/top-level/effects.html
 [envelope]: https://aranya-project.github.io/policy-book/reference/top-level/commands.html#envelope-type

@@ -5,13 +5,26 @@
 #![allow(missing_docs)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
 #![allow(unused_imports)]
 extern crate alloc;
 use alloc::vec::Vec;
 use aranya_policy_ifgen::{
     macros::{action, actions, effect, effects, value},
-    BaseId, ClientError, Value, Text,
+    text, BaseId, ClientError, Value, Text,
 };
+/// DEFAULT_ADMIN_ROLE_RANK constant.
+pub const DEFAULT_ADMIN_ROLE_RANK: i64 = 800i64;
+/// DEFAULT_MEMBER_ROLE_RANK constant.
+pub const DEFAULT_MEMBER_ROLE_RANK: i64 = 600i64;
+/// DEFAULT_OPERATOR_ROLE_RANK constant.
+pub const DEFAULT_OPERATOR_ROLE_RANK: i64 = 700i64;
+/// DEFAULT_OWNER_DEVICE_RANK constant.
+pub const DEFAULT_OWNER_DEVICE_RANK: i64 = 1000000i64;
+/// DEFAULT_OWNER_ROLE_RANK constant.
+pub const DEFAULT_OWNER_ROLE_RANK: i64 = 999999i64;
+/// MAX_RANK constant.
+pub const MAX_RANK: i64 = 1000000i64;
 #[derive(Debug)]
 pub enum Persistent {}
 #[derive(Debug)]
@@ -56,7 +69,6 @@ pub enum Effect {
     AfcUniChannelCreated(AfcUniChannelCreated),
     AfcUniChannelReceived(AfcUniChannelReceived),
     AssignedLabelToDevice(AssignedLabelToDevice),
-    CameraTaskReceived(CameraTaskReceived),
     CheckValidAfcChannels(CheckValidAfcChannels),
     DeviceAdded(DeviceAdded),
     DeviceRemoved(DeviceRemoved),
@@ -112,12 +124,6 @@ pub struct AssignedLabelToDevice {
     pub device: BaseId,
     pub label_id: BaseId,
     pub author_id: BaseId,
-}
-/// CameraTaskReceived policy effect.
-#[effect]
-pub struct CameraTaskReceived {
-    pub task_name: Text,
-    pub recipient: BaseId,
 }
 /// CheckValidAfcChannels policy effect.
 #[effect]
@@ -338,7 +344,6 @@ pub enum EphemeralAction {
     query_labels(query_labels),
     query_labels_assigned_to_device(query_labels_assigned_to_device),
     create_afc_uni_channel(create_afc_uni_channel),
-    task_camera(task_camera),
 }
 /// query_devices_on_team policy action.
 #[action(interface = Ephemeral)]
@@ -496,10 +501,4 @@ pub struct query_labels_assigned_to_device {
 pub struct create_afc_uni_channel {
     pub receiver_id: BaseId,
     pub label_id: BaseId,
-}
-/// task_camera policy action.
-#[action(interface = Ephemeral)]
-pub struct task_camera {
-    pub task_name: Text,
-    pub peer_id: BaseId,
 }
