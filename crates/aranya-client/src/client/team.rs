@@ -1,6 +1,6 @@
 use anyhow::Context as _;
 use aranya_crypto::EncryptionPublicKey;
-use aranya_daemon_api::{self as api, CS};
+use aranya_daemon_api::{self as api, MavData, CS};
 use aranya_id::custom_id;
 use aranya_policy_text::Text;
 use aranya_util::Addr;
@@ -450,6 +450,7 @@ impl Team<'_> {
     }
 
     /// Issue a COSMOS camera task command.
+    #[instrument(skip(self))]
     pub async fn task_camera(&self, task_name: Text, peer: DeviceId) -> Result<Box<[u8]>> {
         let ctrl = self
             .client
@@ -462,6 +463,7 @@ impl Team<'_> {
     }
 
     /// Receive and verify a COSMOS control message.
+    #[instrument(skip(self))]
     pub async fn receive_cosmos_ctrl(&self, task_name: Text, ctrl: Box<[u8]>) -> Result<()> {
         self.client
             .daemon
@@ -486,5 +488,48 @@ impl Team<'_> {
             .map(Label::from_api)
             .collect();
         Ok(Labels { labels })
+    }
+
+    /// Add a system ID mapping.
+    #[instrument(skip(self))]
+    pub async fn map_sys_id(
+        &self,
+        label_name: Text,
+        rank: Rank,
+        system_id: u8,
+        peer_id: DeviceId,
+    ) -> Result<()> {
+        self.client
+            .daemon
+            .map_sys_id(create_ctx(), self.id, system_id, peer_id.into_api())
+            .await
+            .map_err(IpcError::new)?
+            .map_err(aranya_error)?;
+        Ok(())
+    }
+
+    /// Issue a drone task command.
+    #[instrument(skip(self))]
+    pub async fn task_drone(&self) -> Result<Box<[u8]>> {
+        let ctrl = self
+            .client
+            .daemon
+            .task_drone(create_ctx(), self.id)
+            .await
+            .map_err(IpcError::new)?
+            .map_err(aranya_error)?;
+        Ok(ctrl)
+    }
+
+    /// Receive and verify a MAVLink control message.
+    #[instrument(skip(self))]
+    pub async fn receive_mavlink_ctrl(&self, mavdata: MavData, ctrl: Box<[u8]>) -> Result<()> {
+        self.client
+            .daemon
+            .receive_mavlink_ctrl(create_ctx(), self.id, mavdata, ctrl)
+            .await
+            .map_err(IpcError::new)?
+            .map_err(aranya_error)?;
+        Ok(())
     }
 }

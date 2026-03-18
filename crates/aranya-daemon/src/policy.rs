@@ -63,6 +63,7 @@ pub enum Effect {
     LabelCreated(LabelCreated),
     LabelDeleted(LabelDeleted),
     LabelRevokedFromDevice(LabelRevokedFromDevice),
+    MapSysIdReceived(MapSysIdReceived),
     PermAddedToRole(PermAddedToRole),
     PermRemovedFromRole(PermRemovedFromRole),
     QueryAfcChannelIsValidResult(QueryAfcChannelIsValidResult),
@@ -82,6 +83,7 @@ pub enum Effect {
     RoleCreated(RoleCreated),
     RoleDeleted(RoleDeleted),
     RoleRevoked(RoleRevoked),
+    TaskDroneReceived(TaskDroneReceived),
     TeamCreated(TeamCreated),
     TeamTerminated(TeamTerminated),
 }
@@ -159,6 +161,12 @@ pub struct LabelRevokedFromDevice {
     pub label_name: Text,
     pub label_author_id: BaseId,
     pub author_id: BaseId,
+}
+/// MapSysIdReceived policy effect.
+#[effect]
+pub struct MapSysIdReceived {
+    pub system_id: i64,
+    pub peer_id: BaseId,
 }
 /// PermAddedToRole policy effect.
 #[effect]
@@ -292,6 +300,12 @@ pub struct RoleRevoked {
     pub role_id: BaseId,
     pub author_id: BaseId,
 }
+/// TaskDroneReceived policy effect.
+#[effect]
+pub struct TaskDroneReceived {
+    pub task_id: i64,
+    pub recipient: i64,
+}
 /// TeamCreated policy effect.
 #[effect]
 pub struct TeamCreated {
@@ -323,6 +337,7 @@ pub enum PersistentAction {
     delete_label(delete_label),
     assign_label_to_device(assign_label_to_device),
     revoke_label_from_device(revoke_label_from_device),
+    map_sys_id(map_sys_id),
 }
 #[actions(interface = Ephemeral)]
 pub enum EphemeralAction {
@@ -339,6 +354,7 @@ pub enum EphemeralAction {
     query_labels_assigned_to_device(query_labels_assigned_to_device),
     create_afc_uni_channel(create_afc_uni_channel),
     task_camera(task_camera),
+    task_drone(task_drone),
 }
 /// query_devices_on_team policy action.
 #[action(interface = Ephemeral)]
@@ -503,3 +519,12 @@ pub struct task_camera {
     pub task_name: Text,
     pub peer_id: BaseId,
 }
+/// map_sys_id policy action.
+#[action(interface = Persistent)]
+pub struct map_sys_id {
+    pub system_id: i64,
+    pub peer_id: BaseId,
+}
+/// task_drone policy action.
+#[action(interface = Ephemeral)]
+pub struct task_drone {}

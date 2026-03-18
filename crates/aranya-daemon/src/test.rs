@@ -232,13 +232,14 @@ impl TestCtx {
 
             let pk = bundle.public_keys(&eng, &store)?;
 
+            let (policy, _mavlink) = PolicyEngine::new(
+                POLICY_SOURCE,
+                eng,
+                store.try_clone().context("unable to clone keystore")?,
+                bundle.device_id,
+            )?;
             let client = aranya::Client::new(ClientState::new(
-                PolicyEngine::new(
-                    POLICY_SOURCE,
-                    eng,
-                    store.try_clone().context("unable to clone keystore")?,
-                    bundle.device_id,
-                )?,
+                policy,
                 LinearStorageProvider::new(FileManager::new(&storage_dir)?),
             ));
 

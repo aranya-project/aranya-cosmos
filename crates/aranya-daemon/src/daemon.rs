@@ -125,7 +125,7 @@ impl Daemon {
             let psk_store = Arc::new(PskStore::new(initial_keys));
 
             // Initialize Aranya client, sync client,and sync server.
-            let (client, sync_server, manager, syncer, recv_effects) = Self::setup_aranya(
+            let (client, sync_server, manager, syncer, recv_effects, mavlink) = Self::setup_aranya(
                 &cfg,
                 eng.clone(),
                 aranya_store
@@ -179,6 +179,7 @@ impl Daemon {
                 crypto,
                 seed_id_dir,
                 quic: Some(data),
+                mavlink,
             })?;
             Ok(Self {
                 sync_server,
@@ -274,15 +275,16 @@ impl Daemon {
         SyncManager<QuicState, PS, SP, EF>,
         SyncHandle,
         mpsc::Receiver<(GraphId, Vec<EF>)>,
+        mavlink_ffi::Handle,
     )> {
         let device_id = pk.ident_pk.id()?;
 
-        let client = Client::new(ClientState::new(
-            PS::new(POLICY_SOURCE, eng, store, device_id)?,
-            SP::new(
-                FileManager::new(cfg.storage_path()).context("unable to create `FileManager`")?,
-            ),
-        ));
+        let (policy, mavlink) = PS::new(POLICY_SOURCE, eng, store, device_id)?;
+        let storage_provider = SP::new(
+            FileManager::new(cfg.storage_path()).context("unable to create `FileManager`")?,
+        );
+
+        let client = Client::new(ClientState::new(policy, storage_provider));
 
         // Sync in the background at some specified interval.
         let (send_effects, recv_effects) = mpsc::channel(256);
@@ -303,7 +305,7 @@ impl Daemon {
             conns,
         )?;
 
-        Ok((client, server, syncer, peers, recv_effects))
+        Ok((client, server, syncer, peers, recv_effects, mavlink))
     }
 
     /// Loads the crypto engine.
