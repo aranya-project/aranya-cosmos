@@ -37,13 +37,61 @@ For more information about this demo, see the companion [plugin repository](http
 2. An OpenC3 COSMOS deployment, see the [installation guide](https://docs.openc3.com/docs/getting-started/installation)
     - You'll need to update `docker-compose.yaml` to allow inbound UDP into the `openc3-operator` container. Under `ports`, add:
 
-    ```yaml
-    - "127.0.0.1:6201:6201/udp"
-    ```
-	- Make sure to leave COSMOS running in the background. You can verify it is running by visiting [http://localhost:2900/](http://localhost:2900/).
-3. Access to the COSMOS CLI, or the prebuilt gem `openc3-cosmos-gate-1.0.0.gem`
-4. [rustup](https://rustup.rs/)
-    - Verify cargo is available in your shell with `cargo --version`
+- [Aranya Examples](examples/): examples of how to integrate Aranya into an application. We currently support direct integration into Rust and C applications.
+
+## Feature Flags
+
+There are currently three classifications of feature sets we can build:
+- Production - the default set of production ready features included in every build. Future changes are guaranteed to be backward compatible. Release artifacts are appended with *-default.
+- Preview - production ready features with plans for long-term support. May introduce breaking changes but are designed with API stability in mind. Release artifacts are appended with *-preview.
+- Experimental - experimental features with no backward compatibility or long-term support guarantees. These features may be unstable or introduce breaking changes in the future. Release artifacts are appended with *-experimental.
+
+AFC is enabled by default.
+
+Rather than requiring feature flags to be manually specified with `cargo build --features ...`, `cargo make` commands are provided in [Makefile.toml](Makefile.toml) for each feature set.
+
+## Cargo Make
+
+We rely heavely on `cargo make` targets to build software, run integration tests, perform unit tests, and run CICD checks. Here's how to install `cargo make`:
+[cargo-make](https://github.com/sagiegurari/cargo-make?tab=readme-ov-file#installation)
+
+Building Aranya:
+- `cargo make build` - builds release version of the daemon executable at [daemon](crates/aranya-daemon/).
+- `cargo make build-capi` - builds the Aranya C API library including the [aranya-client.h](crates/aranya-client-capi/output/aranya-client.h) header file and `libaranya_client_capi.*` shared library artifact. The extension of the shared library artifact depends on what system it is built on. E.g. MacOS will have a `.dylib` extension while linux would have a `.so` extension.
+
+Testing Aranya:
+- `cargo make test` - runs Rust unit tests with all feature combinations
+
+Examples (these are run as part of the CICD pipeline to ensure they do not break):
+- `cargo make run-rust-example` - runs the default Rust example
+- `cargo make run-rust-example-multi-node` - runs the multi-node Rust example
+- `cargo make run-capi-example` - runs the C example
+
+A complete list of examples can be found at [examples](examples/):
+- [Rust examples](examples/rust/)
+- [C examples](examples/c/)
+
+CICD checks:
+- `cargo make security` - runs security checks such as `cargo-audit`, `cargo-deny` and `cargo-vet`
+- `cargo make correctness` - runs correctness checks such as `cargo fmt`, `cargo clippy`, and `cargo-machete`
+- `cargo make gen-docs` - generates `rustdocs`
+
+Performance metrics:
+- `cargo make metrics`
+
+Auto-formatting code:
+- `cargo make fmt`
+
+We allow certain targets to be run for specific sets of feature flags by appending `*-preview` or `*-experimental`:
+- `cargo make build-preview`
+- `cargo make build-experimental`
+- `cargo make build-capi-lib-preview`
+- `cargo make build-capi-lib-experimental`
+
+
+A complete list of `cargo make` targets can be found in the [Makefile.toml](Makefile.toml) or by running `cargo make` in the workspace root without any arguments.
+
+## Getting Started
 
 If you feel lost at any point, see Helpers and Troubleshooting steps in the companion [plugin repository](https://github.com/matcala/openc3-cosmos-gate.git).
 
@@ -71,9 +119,13 @@ If you feel lost at any point, see Helpers and Troubleshooting steps in the comp
    - Open the Admin Console.
    - Click **Install From File**, select the `.gem` you built, or the prebuilt one.
 
-3. Verify in CmdTlmServer:
-   - Interface `GATE_INT` appears and shows **CONNECTED**.
-   - Target `GATE` routes telecommands and telemetry through `GATE_INT`.
+The following are needed to build and run Aranya code:
+- [Rust](https://www.rust-lang.org/tools/install) (Find version info in the
+[rust-toolchain.toml](rust-toolchain.toml))
+> NOTE: When building with Rust, the compiler will automatically download and
+> use the version specified by the `rust-toolchain.toml`.
+- (Optional) [cargo-make](https://github.com/sagiegurari/cargo-make?tab=readme-ov-file#installation) (v0.37.23)
+- (Optional) Git for cloning the repository
 
 ### Initialize the ground and flight Aranya instances
 
@@ -83,61 +135,123 @@ If you feel lost at any point, see Helpers and Troubleshooting steps in the comp
 	```
 	This places the daemon binary at: `aranya-cosmos/target/release/aranya-daemon`
 
-1. Access the COSMOS gate example app from the `aranya-cosmos` root and create two working directories for persistent state of each Aranya instance:
-	```bash
-	cd ./examples/rust/cosmos-gate
-	mkdir gate-daemon
-	mkdir flight-daemon
-	```
+#### Integrate
 
-1. Run the initializer:
-	```bash
-	cargo run --bin cosmos-gate-init <path_to_aranya-daemon_binary> <path_to_gate_daemon_dir> <path_to_flight_daemon_dir>
-	```
+Integrate the client library into your application. The `aranya-client`
+[README](crates/aranya-client/README.md) has more information on using
+the Rust client.
 
-	What this does:
+An example of the Rust client library being used to create a team follows:
 
-	- Creates a team owned by the ground instance, adds the flight instance as a member
-	- Persists onboarding state inside the `gate-daemon` and `flight-daemon` directories
-	- Produces ready-to-ship working dirs that you can reuse on other machines to skip re-onboarding
-
-3. Start the ground REST server and point it at the ground working directory:
-	```bash
-	cargo run --bin cosmos-gate-server  <path_to_aranya-daemon_binary> <path_to_gate_daemon_dir>
-	```
-
-If successful, the server listens on `127.0.0.1` using its default port. Use this URL as the `rest_endpoint` in your COSMOS dispatcher configuration.
-
-### Running the Demo
-
-You should have COSMOS and the ground REST server both still running in the background.
-
-1. **Start the mock target container**
-
-In another terminal, enter the subdirectory root for the `openc3-cosmos-gate` plugin.
-
-Build and run the container from the subdirectory root:
-```bash
-cd tools
-docker build -t target .
-docker run --rm --name target -p 6200:6200/udp target:latest
+```rust
+// create team.
+info!("creating team");
+let team_id = team
+	.owner
+	.client
+	.create_team()
+	.await
+	.expect("expected to create team");
+info!(?team_id);
 ```
 
-- The Python app emits telemetry every second to the configured UDP port as defined in `openc3-cosmos-gate/targets/GATE/cmd_tlm/tlm.txt`.
-- In the COSMOS CmdTlmServer view, observe `rx bytes` and `tlm pkts` increase every second.
-- Use the Packet Viewer tool to inspect inbound telemetry.
+This snippet can be found in the
+[Rust example](examples/rust/aranya-example/src/main.rs#L198).
 
-2. **Test the integration**
-   - Open the Command Sender in COSMOS.
-   - Two telecommands are defined for the `GATE` target:
-     - `NOOP`, the dispatcher skips the Aranya gate for this command, check CmdTlmServer logs.
-     - `ARANYA_EP_EXP1`, CmdTlmServer logs should show the dispatcher posting the packet to the Aranya gate. The Aranya gate logs should show a received packet. If the policy allows, the gate returns a serialized command, the dispatcher inserts it into the `SER_CMD` field, then the packet is sent to the mock target, which logs receipt.
+Before starting your application, run the daemon by providing the path to a
+[configuration file](crates/aranya-daemon/example.toml). Find more details on
+configuring and running the daemon in the `aranya-daemon`
+[README](crates/aranya-daemon/README.md).
 
-> The dispatcher behavior is keyed off the CCSDS function code field. Feel free to modify the dispatcher script to adapt behavior.
+### <a href name="c-api"></a>C API
 
-## License Notice
+#### Dependencies
 
-This project integrates with OpenC3 COSMOS (licensed under AGPL-3.0) but does not include, redistribute, or modify COSMOS. Users must obtain COSMOS separately and comply with its license. All components provided here are independent works that interact with COSMOS only through its documented plugin, configuration, and protocol interfaces. Use with commercial or Enterprise editions of COSMOS is subject to the applicable OpenC3 license agreement.
+- [Rust](https://www.rust-lang.org/tools/install) (find version info in the
+[rust-toolchain.toml](rust-toolchain.toml))
+> NOTE: When building with Rust, the compiler will automatically download and
+> use the version specified by the `rust-toolchain.toml`.
+- [cmake](https://cmake.org/download/) (v3.31)
+- [clang](https://releases.llvm.org/download.html) (v18.1)
+- [cargo-make](https://github.com/sagiegurari/cargo-make?tab=readme-ov-file#installation) (v0.37.23)
+- (Optional) Git for cloning the repository
+
+> NOTE: we have tested using the specified versions above. Other versions of these tools may also work.
+
+If you'd like to run the C example app, see [below](#example-applications).
+
+#### Install
+
+Prebuilt versions of the library are uploaded (along with the [header file](https://github.com/aranya-project/aranya/blob/main/crates/aranya-client-capi/output/aranya-client.h)) to each Aranya [release](https://github.com/aranya-project/aranya/releases).
+
+A prebuilt version of the `aranya-daemon` is available for supported platforms
+in the Aranya [release](https://github.com/aranya-project/aranya/releases).
+
+If your platform is unsupported, you may checkout the source code and build
+locally.
+
+#### Integrate
+
+Aranya can then be integrated using `cmake`. A
+[CMakeLists.txt](https://github.com/aranya-project/aranya/blob/main/examples/c/CMakeLists.txt)
+is provided to make it easier to build the library into an application.
+
+An example of the C API being used to create a team follows:
+
+```C
+// have owner create the team.
+err = aranya_create_team(&team->clients.owner.client, &team->id);
+EXPECT("error creating team", err);
+```
+
+This snippet has been modified for simplicity. For actual usage,
+see the [C example](examples/c/example.c#L169).
+
+Before starting your application, run the daemon by providing the path to a
+[configuration file](crates/aranya-daemon/example.toml). Find more details on
+configuring and running the daemon in the `aranya-daemon`
+[README](crates/aranya-daemon/README.md).
+
+## <a name="example-applications"></a>Example Applications
+
+We have provided runnable example applications in both
+[Rust](examples/rust) and [C](examples/c/). These examples will
+use the default policy that's contained in this repo to configure and run the
+daemon automatically. The examples follow five devices who are referred to by
+their device role, `Owner`, `Admin`, `Operator`, `Member A` and `Member B`.
+
+The examples go through the following steps:
+
+Step 1: Build or download the prebuilt executable from the latest Aranya
+release. After providing a unique configuration file (see
+[example.toml](crates/aranya-daemon/example.toml)) for each device, run the
+daemons.
+
+Step 2. The `Owner` initializes the team
+
+Step 3. The `Owner` adds the `Admin` and `Operator` to the team. `Member A` and
+`Member B` can either be added by the `Owner` or `Operator`.
+
+Step 4. The `Admin` creates an Aranya Fast Channel label
+
+Step 5. The `Operator` assigns the created Fast Channel label to `Member A`
+and `Member B`
+
+Step 6. `Member A` creates a unidirectional send Aranya Fast Channel with `Member B`.
+
+Step 7. `Member B` receives the channel by receiving a control message from `Member A`.
+
+Step 8. `Member A` uses this channel to encrypt plaintext with `seal()` and send the ciphertext to `Member B`.
+
+Step 9. `Member B` receives the ciphertext from `Member A` and decrypts it with `open()`.
+
+For more details on how Aranya starts and the steps performed in the examples,
+see the [walkthrough](https://aranya-project.github.io/aranya-docs/getting-started/walkthrough/).
+
+## Contributing
+
+Find information on contributing to the Aranya project in
+[`CONTRIBUTING.md`](https://github.com/aranya-project/.github/blob/main/CONTRIBUTING.md).
 
 ## Maintainers
 
