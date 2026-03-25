@@ -1955,6 +1955,16 @@ function is_owner(role struct Role) bool {
     return role.default && role.name == "owner"
 }
 
+// Reports whether the provided role represents the default admin role.
+function is_admin(role struct Role) bool {
+    return role.default && role.name == "admin"
+}
+
+// Reports whether the provided role represents the default member role.
+function is_member(role struct Role) bool {
+    return role.default && role.name == "member"
+}
+
 // Returns the ID of the role assigned to the device.
 //
 // # Errors
