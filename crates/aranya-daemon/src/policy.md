@@ -3971,9 +3971,11 @@ ephemeral command TaskCamera {
         let author = get_author(envelope)
         let author_role = get_assigned_role(author.device_id)
 
-        // SAMPLE_APP_RESET requires Admin role; all other tasks require Owner.
+        // SAMPLE_APP_RESET is restricted: the owner role cannot issue it.
+        // This demonstrates a deny scenario where certain commands are
+        // off-limits even for the team owner.
         if this.task_name == "SAMPLE_APP_RESET" {
-            check is_admin(author_role)
+            check !is_owner(author_role)
         } else {
             check is_owner(author_role)
         }
